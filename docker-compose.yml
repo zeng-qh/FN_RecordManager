@@ -1,0 +1,37 @@
+# VoiceVault 服务端部署（NAS / 树莓派 4B / x86 通用）
+# 用法：
+#   echo "VAULT_TOKEN=你的强令牌" > .env
+#   docker compose up -d
+services:
+  voicvault:
+    # 本地构建（含 arm64）或拉取已发布的 GHCR 镜像
+    image: ghcr.io/your-org/voicvault-server:latest
+    build:
+      context: ./server
+      platforms:
+        - linux/amd64
+        - linux/arm64
+    container_name: voicvault
+    ports:
+      - "8080:8080"
+    environment:
+      - VAULT_TOKEN=${VAULT_TOKEN:-change-me-please}
+      - VAULT_DATADIR=/data
+      - VAULT_PORT=8080
+      - VAULT_BIND=0.0.0.0
+    volumes:
+      - voicvault-data:/data
+    restart: unless-stopped
+
+  # 可选：本地语音转写边车（默认关闭，启用后到网页端设置里打开 ASR）
+  # asr:
+  #   image: ghcr.io/your-org/voicvault-asr:latest
+  #   build: ./asr
+  #   ports:
+  #     - "8000:8000"
+  #   volumes:
+  #     - ./asr-models:/root/.cache  # 缓存 Whisper 模型
+  #   restart: unless-stopped
+
+volumes:
+  voicvault-data:

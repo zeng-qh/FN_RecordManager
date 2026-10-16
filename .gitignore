@@ -1,0 +1,20 @@
+# 构建产物
+server/bin/
+server/obj/
+client-android/app/build/
+client-android/.gradle/
+
+# 本地数据
+server/data/
+data/
+voicvault-data/
+
+# 安装脚本（不应入库）
+dotnet-install.sh
+
+# 杂项
+*.user
+.DS_Store
+__pycache__/
+*.pyc
+.env

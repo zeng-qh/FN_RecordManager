@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>录音保险箱 · VoiceVault</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">🎙️</span>
+      <div>
+        <h1>录音保险箱</h1>
+        <small>VoiceVault · 本地私有备份</small>
+      </div>
+    </div>
+    <div class="actions">
+      <input id="search" type="search" placeholder="搜索文件名 / 标题…" />
+      <button id="refresh" title="刷新">🔄</button>
+      <button id="settingsBtn" title="设置">⚙️</button>
+    </div>
+  </header>
+
+  <main>
+    <div id="status" class="status"></div>
+    <div id="timeline" class="timeline"></div>
+  </main>
+
+  <footer class="player" id="playerBar" hidden>
+    <div class="nowplaying" id="nowPlaying">未在播放</div>
+    <audio id="audio" controls preload="metadata"></audio>
+  </footer>
+
+  <!-- 设置弹窗 -->
+  <div id="settingsModal" class="modal" hidden>
+    <div class="modal-card">
+      <h2>设置</h2>
+      <label>服务器地址
+        <input id="cfgServer" type="text" placeholder="http://192.168.1.10:8080" />
+      </label>
+      <label>访问令牌 (Token)
+        <input id="cfgToken" type="password" placeholder="与服务端 VAULT_TOKEN 一致" />
+      </label>
+      <hr />
+      <h3>本地转写 (ASR)</h3>
+      <label class="row">
+        <input id="cfgAsrEnabled" type="checkbox" /> 启用语音转文字
+      </label>
+      <label>ASR 边车地址
+        <input id="cfgAsrEndpoint" type="text" placeholder="http://localhost:8000" />
+      </label>
+      <label>模型规模
+        <select id="cfgAsrModel">
+          <option value="tiny">tiny（最快）</option>
+          <option value="base">base</option>
+          <option value="small" selected>small（推荐）</option>
+          <option value="medium">medium（更准）</option>
+        </select>
+      </label>
+      <label class="row">
+        <input id="cfgAsrDiarize" type="checkbox" /> 说话人分段
+      </label>
+      <div class="modal-actions">
+        <button id="testConn">测试连接</button>
+        <button id="saveSettings" class="primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

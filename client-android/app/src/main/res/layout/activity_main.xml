@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="录音保险箱 · VoiceVault"
+        android:textSize="18sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="12dp" />
+
+    <EditText
+        android:id="@+id/serverUrl"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="服务器地址，如 http://192.168.1.10:8080"
+        android:inputType="textUri" />
+
+    <EditText
+        android:id="@+id/token"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="访问令牌 Token"
+        android:inputType="textPassword"
+        android:layout_marginTop="8dp" />
+
+    <Button
+        android:id="@+id/pickDir"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="选择录音目录（MIUI/sound_recorder）"
+        android:layout_marginTop="8dp" />
+
+    <TextView
+        android:id="@+id/dirText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="尚未选择目录"
+        android:textSize="13sp"
+        android:layout_marginTop="4dp" />
+
+    <Button
+        android:id="@+id/saveStart"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="保存并启动自动同步"
+        android:layout_marginTop="12dp" />
+
+    <Button
+        android:id="@+id/syncNow"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="立即同步一次" />
+
+    <TextView
+        android:id="@+id/log"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="13sp"
+        android:layout_marginTop="12dp" />
+
+</LinearLayout>
