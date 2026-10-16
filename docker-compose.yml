@@ -5,7 +5,7 @@
 services:
   voicvault:
     # 本地构建（含 arm64）或拉取已发布的 GHCR 镜像
-    image: ghcr.io/your-org/voicvault-server:latest
+    image: ghcr.io/zeng-qh/voicvault-server:latest
     build:
       context: ./server
       platforms:
@@ -25,7 +25,7 @@ services:
 
   # 可选：本地语音转写边车（默认关闭，启用后到网页端设置里打开 ASR）
   # asr:
-  #   image: ghcr.io/your-org/voicvault-asr:latest
+  #   image: ghcr.io/zeng-qh/voicvault-asr:latest
   #   build: ./asr
   #   ports:
   #     - "8000:8000"
