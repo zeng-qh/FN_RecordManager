@@ -32,7 +32,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         try {
             val scanned = RecordingScanner.scan(applicationContext, treeUri)
             val entries = scanned.map {
-                ApiClient.FileEntry(it.relPath, it.size, it.mtime, it.sha256)
+                FileEntry(it.relPath, it.size, it.mtime, it.sha256)
             }
             val diff = ApiClient.diff(server, token, device, entries)
 
@@ -44,7 +44,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                     applicationContext.contentResolver.openInputStream(s.doc.uri)?.use { ins ->
                         ApiClient.upload(
                             server, token, device,
-                            ApiClient.FileEntry(s.relPath, s.size, s.mtime, s.sha256), ins
+                            FileEntry(s.relPath, s.size, s.mtime, s.sha256), ins
                         )
                     }
                     ok++

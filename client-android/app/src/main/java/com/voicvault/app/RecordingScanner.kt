@@ -53,7 +53,9 @@ object RecordingScanner {
             ins = context.contentResolver.openInputStream(uri)
             val buf = ByteArray(8192)
             var n: Int
-            while (ins != null && ins.read(buf).also { n = it } > 0) {
+            while (ins != null) {
+                n = ins.read(buf)
+                if (n <= 0) break
                 md.update(buf, 0, n)
             }
         } finally {
