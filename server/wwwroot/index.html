@@ -47,6 +47,9 @@
       <label class="row">
         <input id="cfgAsrEnabled" type="checkbox" /> 启用语音转文字
       </label>
+      <label class="row">
+        <input id="cfgAsrAuto" type="checkbox" /> 自动转写新录音（上传后后台排队）
+      </label>
       <label>ASR 边车地址
         <input id="cfgAsrEndpoint" type="text" placeholder="http://localhost:8000" />
       </label>
@@ -64,6 +67,42 @@
       <div class="modal-actions">
         <button id="testConn">测试连接</button>
         <button id="saveSettings" class="primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 录音详情：左侧播放 / 右侧文字稿 -->
+  <div id="detailModal" class="modal" hidden>
+    <div class="detail">
+      <div class="detail-head">
+        <div class="detail-title">
+          <h2 id="dTitle">—</h2>
+          <div id="dMeta" class="d-meta"></div>
+        </div>
+        <button id="dClose" title="关闭">✕</button>
+      </div>
+      <div class="detail-body">
+        <section class="d-left">
+          <div class="d-player-card">
+            <button id="dPlay" class="d-playbtn" title="播放/暂停">▶</button>
+            <div class="d-player-info">
+              <div id="dState" class="d-state">就绪</div>
+              <audio id="dAudio" controls preload="metadata"></audio>
+            </div>
+          </div>
+          <div id="dInfo" class="d-info-card"></div>
+          <a id="dDownload" class="d-download" download>⬇ 下载原文件</a>
+        </section>
+        <section class="d-right">
+          <div class="d-trans-head">
+            <h3>文字稿</h3>
+            <div class="d-trans-actions">
+              <button id="dCopy">复制全文</button>
+              <button id="dTranscribe">立即转写</button>
+            </div>
+          </div>
+          <div id="dTranscript" class="d-transcript"></div>
+        </section>
       </div>
     </div>
   </div>

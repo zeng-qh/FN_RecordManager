@@ -8,6 +8,9 @@ public class AsrConfig
     /// <summary>是否启用转写。默认关闭，备份不受影响。</summary>
     public bool Enabled { get; set; }
 
+    /// <summary>上传完成后是否自动排队转写（需 Enabled=true）。</summary>
+    public bool AutoTranscribe { get; set; }
+
     /// <summary>ASR 边车地址，如 http://localhost:8000。</summary>
     public string Endpoint { get; set; } = "http://localhost:8000";
 

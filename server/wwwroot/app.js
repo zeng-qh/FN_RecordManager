@@ -144,10 +144,15 @@ function renderItem(it) {
     ops.appendChild(tBtn);
   }
   const vBtn = el("button", null, "文字稿");
-  vBtn.onclick = () => toggleTranscript(it.id, vBtn);
+  vBtn.onclick = () => openDetail(it.id);
   ops.appendChild(vBtn);
 
   item.append(play, meta, badge, ops);
+  // 点击条目任意非按钮区域 → 打开详情（左播放 / 右文字稿）
+  item.addEventListener("click", (e) => {
+    if (e.target.closest("button")) return;
+    openDetail(it.id);
+  });
   return item;
 }
 
@@ -167,52 +172,169 @@ function playRecording(it) {
   $("#nowPlaying").textContent = it.title || it.fileName;
 }
 
-// ---- 文字稿 ----
-async function toggleTranscript(id, btn) {
-  const item = btn.closest(".item");
-  const existing = item.querySelector(".transcript");
-  if (existing) {
-    existing.remove();
-    btn.textContent = "文字稿";
-    return;
-  }
-  btn.textContent = "加载中…";
+// ---- 详情页：左播放 / 右文字稿 ----
+let detailId = null;
+let detailPollTimer = null;
+let detailTranscriptData = null;
+
+async function openDetail(id) {
+  stopDetailPoll();
+  detailId = id;
+  detailTranscriptData = null;
   try {
-    const res = await api(`/api/recordings/${id}/transcript`);
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      btn.textContent = "文字稿";
-      alert("文字稿尚未生成（状态：" + (err.status || "unknown") + "）");
-      return;
-    }
-    const data = await res.json();
-    item.appendChild(renderTranscript(data));
-    btn.textContent = "收起";
+    const res = await api(`/api/recordings/${id}`);
+    if (!res.ok) { setStatus("详情获取失败（HTTP " + res.status + "）"); return; }
+    const rec = await res.json();
+
+    $("#dTitle").textContent = rec.title || rec.fileName;
+    $("#dMeta").textContent =
+      `${fmtDate(rec.recordedAt)} ${fmtClock(rec.recordedAt)} · ${fmtSize(rec.size)} · 设备 ${rec.device}`;
+    $("#dInfo").innerHTML =
+      `<div>文件名：${escapeHtml(rec.fileName || "-")}</div>` +
+      `<div>路径：${escapeHtml(rec.relPath || "-")}</div>` +
+      `<div>大小：${fmtSize(rec.size)} · SHA-256：${escapeHtml((rec.sha256 || "").slice(0, 16))}…</div>`;
+
+    const base = state.server.replace(/\/$/, "");
+    const url = `${base}/api/recordings/${id}/file?token=${encodeURIComponent(state.token)}`;
+    const audio = $("#dAudio");
+    audio.src = url;
+    const dl = $("#dDownload");
+    dl.href = url;
+    dl.setAttribute("download", rec.fileName || `recording-${id}`);
+    $("#dState").textContent = "就绪";
+    $("#dPlay").textContent = "▶";
+
+    $("#detailModal").hidden = false;
+    loadDetailTranscript(id);
   } catch (e) {
-    btn.textContent = "文字稿";
+    setStatus("详情加载失败：" + e.message);
   }
 }
 
-function renderTranscript(data) {
-  const box = el("div", "transcript");
-  if (data.language) box.appendChild(el("div", "sub", "语言：" + data.language));
+function closeDetail() {
+  const audio = $("#dAudio");
+  if (audio) audio.pause();
+  stopDetailPoll();
+  detailId = null;
+  $("#detailModal").hidden = true;
+}
+
+function stopDetailPoll() {
+  if (detailPollTimer) { clearInterval(detailPollTimer); detailPollTimer = null; }
+}
+
+async function loadDetailTranscript(id) {
+  const box = $("#dTranscript");
+  box.innerHTML = '<div class="d-loading">加载文字稿…</div>';
+  try {
+    const res = await api(`/api/recordings/${id}/transcript`);
+    if (res.status === 404) {
+      const err = await res.json().catch(() => ({}));
+      const st = err.status || "none";
+      if (st === "pending") {
+        box.innerHTML = '<div class="d-loading">⏳ 转写进行中，完成后自动显示…</div>';
+        startDetailPoll(id);
+      } else if (st === "error") {
+        box.innerHTML = '<div class="d-empty">上次转写失败。可点右上「立即转写」重试。</div>';
+      } else {
+        box.innerHTML = '<div class="d-empty">尚未转写。<br/>可在设置里开启「自动转写新录音」，或点右上「立即转写」。</div>';
+      }
+      return;
+    }
+    if (!res.ok) {
+      box.innerHTML = '<div class="d-empty">文字稿获取失败（HTTP ' + res.status + "）</div>";
+      return;
+    }
+    renderDetailTranscript(await res.json());
+  } catch (e) {
+    box.innerHTML = '<div class="d-empty">网络异常，请稍后重试。</div>';
+  }
+}
+
+function renderDetailTranscript(data) {
+  detailTranscriptData = data;
+  const box = $("#dTranscript");
+  box.innerHTML = "";
+  if (data.language) box.appendChild(el("div", "d-lang", "识别语言：" + escapeHtml(data.language)));
   if (data.segments && data.segments.length) {
     for (const seg of data.segments) {
       const line = el("span", "seg");
       const spk = seg.speaker ? `<span class="spk">[${escapeHtml(seg.speaker)}]</span>` : "";
       line.innerHTML = `<span class="ts">${fmtSec(seg.start)}</span>${spk}${escapeHtml(seg.text || "")}`;
       line.onclick = () => {
-        const audio = $("#audio");
-        if (audio) audio.currentTime = seg.start;
+        const audio = $("#dAudio");
+        if (audio && audio.src) { audio.currentTime = seg.start; audio.play().catch(() => {}); }
       };
       box.appendChild(line);
     }
   } else if (data.text) {
-    box.appendChild(el("div", null, escapeHtml(data.text)));
+    box.appendChild(el("div", "d-plain", escapeHtml(data.text)));
   } else {
-    box.appendChild(el("div", "sub", "（无文字内容）"));
+    box.appendChild(el("div", "d-empty", "（无文字内容）"));
   }
-  return box;
+}
+
+function startDetailPoll(id) {
+  stopDetailPoll();
+  let tries = 0;
+  detailPollTimer = setInterval(async () => {
+    tries += 1;
+    if (detailId !== id || tries > 600) { stopDetailPoll(); return; }
+    try {
+      const res = await api(`/api/recordings/${id}/transcript`);
+      if (res.ok) {
+        stopDetailPoll();
+        renderDetailTranscript(await res.json());
+        loadRecordings(true); // 顺带刷新列表徽标
+      }
+    } catch (e) { /* 网络抖动，继续轮询 */ }
+  }, 3000);
+}
+
+function transcriptPlainText(d) {
+  if (d && d.segments && d.segments.length) {
+    return d.segments
+      .map((s) => (s.speaker ? `[${s.speaker}] ` : "") + `${fmtSec(s.start)} ${s.text || ""}`)
+      .join("\n");
+  }
+  return (d && d.text) || "";
+}
+
+async function copyTranscript() {
+  const text = transcriptPlainText(detailTranscriptData);
+  if (!text) { alert("暂无可复制的文字稿。"); return; }
+  try {
+    await navigator.clipboard.writeText(text);
+    setStatus("文字稿已复制到剪贴板。");
+  } catch (e) {
+    // 非 HTTPS 环境降级
+    const ta = el("textarea");
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); setStatus("文字稿已复制到剪贴板。"); }
+    catch (e2) { alert("复制失败，请手动选择文本。"); }
+    ta.remove();
+  }
+}
+
+async function transcribeFromDetail() {
+  if (!detailId) return;
+  const id = detailId;
+  try {
+    const res = await api(`/api/recordings/${id}/transcribe`, { method: "POST" });
+    if (res.ok) {
+      $("#dTranscript").innerHTML = '<div class="d-loading">⏳ 已加入转写队列，完成后自动显示…</div>';
+      startDetailPoll(id);
+    } else {
+      const d = await res.json().catch(() => ({}));
+      if (d.error === "asr disabled") {
+        alert("ASR 未启用：请先在设置里开启「启用语音转文字」，并确认 NAS 上已部署 ASR 边车。");
+      } else {
+        alert("无法转写：" + (d.error || res.status));
+      }
+    }
+  } catch (e) {}
 }
 
 async function triggerTranscribe(id) {
@@ -271,6 +393,7 @@ async function refreshSettingsForm() {
     const d = await res.json();
     state.asrEnabled = !!(d.asr && d.asr.enabled);
     $("#cfgAsrEnabled").checked = state.asrEnabled;
+    $("#cfgAsrAuto").checked = !!(d.asr && d.asr.autoTranscribe);
     $("#cfgAsrEndpoint").value = d.asr?.endpoint || "";
     $("#cfgAsrModel").value = d.asr?.model || "small";
     $("#cfgAsrDiarize").checked = !!(d.asr && d.asr.speakerDiarization);
@@ -283,9 +406,10 @@ async function saveSettings() {
   localStorage.setItem(LS_SERVER, state.server);
   localStorage.setItem(LS_TOKEN, state.token);
 
-  // 若启用 ASR，把开关与参数写回服务端
+  // 把 ASR 配置写回服务端（含自动转写开关）
   const asr = {
     enabled: $("#cfgAsrEnabled").checked,
+    autoTranscribe: $("#cfgAsrAuto").checked,
     endpoint: $("#cfgAsrEndpoint").value.trim(),
     model: $("#cfgAsrModel").value,
     speakerDiarization: $("#cfgAsrDiarize").checked,
@@ -326,6 +450,39 @@ $("#refresh").onclick = () => loadRecordings(true);
 $("#settingsBtn").onclick = () => openSettings();
 $("#saveSettings").onclick = saveSettings;
 $("#testConn").onclick = testConnection;
+
+// 详情弹层事件
+$("#dClose").onclick = closeDetail;
+$("#dCopy").onclick = copyTranscript;
+$("#dTranscribe").onclick = transcribeFromDetail;
+$("#detailModal").addEventListener("click", (e) => {
+  if (e.target.id === "detailModal") closeDetail();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("#detailModal").hidden) closeDetail();
+});
+
+// 详情页播放器状态
+(function wireDetailPlayer() {
+  const audio = $("#dAudio");
+  const playBtn = $("#dPlay");
+  playBtn.onclick = () => {
+    if (!audio.src) return;
+    if (audio.paused) audio.play().catch(() => {});
+    else audio.pause();
+  };
+  audio.onplay = () => { playBtn.textContent = "⏸"; };
+  audio.onpause = () => { playBtn.textContent = "▶"; };
+  audio.onended = () => { playBtn.textContent = "▶"; $("#dState").textContent = "播放结束"; };
+  audio.ontimeupdate = () => {
+    if (audio.duration && isFinite(audio.duration)) {
+      $("#dState").textContent = `${fmtSec(audio.currentTime)} / ${fmtSec(audio.duration)}`;
+    } else if (audio.currentTime) {
+      $("#dState").textContent = fmtSec(audio.currentTime);
+    }
+  };
+})();
+
 let searchTimer;
 $("#search").oninput = (e) => {
   clearTimeout(searchTimer);

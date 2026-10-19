@@ -22,6 +22,8 @@ builder.Services.AddSingleton(new DbService(cfg.DataDir));
 builder.Services.AddSingleton(new StorageService(cfg.DataDir));
 builder.Services.AddSingleton(new AuthService(cfg.Token));
 builder.Services.AddHttpClient<AsrClient>();
+builder.Services.AddSingleton<TranscriptionQueue>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<TranscriptionQueue>());
 builder.Services.AddLogging();
 
 var app = builder.Build();
@@ -30,6 +32,7 @@ var db = app.Services.GetRequiredService<DbService>();
 var storage = app.Services.GetRequiredService<StorageService>();
 var auth = app.Services.GetRequiredService<AuthService>();
 var asr = app.Services.GetRequiredService<AsrClient>();
+var queue = app.Services.GetRequiredService<TranscriptionQueue>();
 var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("VoiceVault");
 
 // 鉴权中间件：除 /api/health 外的所有 /api/* 均需 Bearer Token
@@ -121,6 +124,14 @@ api.MapPost("/upload", async (HttpContext ctx) =>
         };
         var id = db.Upsert(rec);
         logger.LogInformation("Uploaded {RelPath} -> id={Id} size={Size}", relPath, id, size);
+
+        // 自动转写：ASR 已启用且允许自动转写时，入后台队列
+        if (cfg.Asr.Enabled && cfg.Asr.AutoTranscribe)
+        {
+            queue.Enqueue(id);
+            logger.LogInformation("Auto-transcribe queued id={Id}", id);
+        }
+
         return Results.Ok(new { id, status = "uploaded", sha = actualSha });
     }
     catch (InvalidDataException ex)
@@ -198,7 +209,7 @@ api.MapGet("/recordings/{id:long}/transcript", (long id) =>
     return Results.Content(json, "application/json");
 });
 
-// 触发转写（仅当 ASR 启用）
+// 触发转写（仅当 ASR 启用；任务进后台队列串行执行）
 api.MapPost("/recordings/{id:long}/transcribe", (long id) =>
 {
     if (!cfg.Asr.Enabled)
@@ -207,28 +218,7 @@ api.MapPost("/recordings/{id:long}/transcribe", (long id) =>
     var rec = db.GetById(id);
     if (rec is null) return Results.NotFound(new { error = "not found" });
 
-    db.UpdateTranscript(id, "", "pending", null);
-    _ = Task.Run(async () =>
-    {
-        try
-        {
-            var result = await asr.TranscribeAsync(rec.StoredPath);
-            if (result is null) { db.UpdateTranscript(id, "", "error", null); return; }
-
-            var tDir = Path.Combine(cfg.DataDir, "transcripts");
-            Directory.CreateDirectory(tDir);
-            var tPath = Path.Combine(tDir, $"{id}.json");
-            await File.WriteAllTextAsync(tPath, JsonSerializer.Serialize(result, jsonOptions));
-            db.UpdateTranscript(id, tPath, "done", result.Language);
-            logger.LogInformation("Transcribed id={Id} lang={Lang}", id, result.Language);
-        }
-        catch (Exception ex)
-        {
-            db.UpdateTranscript(id, "", "error", null);
-            logger.LogError(ex, "Transcribe failed id={Id}", id);
-        }
-    });
-
+    queue.Enqueue(id);
     return Results.Accepted(null, new { status = "pending" });
 });
 
@@ -242,10 +232,12 @@ api.MapGet("/settings", () => Results.Ok(new
 api.MapPut("/settings", (AsrConfig incoming) =>
 {
     cfg.Asr.Enabled = incoming.Enabled;
+    cfg.Asr.AutoTranscribe = incoming.AutoTranscribe;
     cfg.Asr.Endpoint = incoming.Endpoint;
     cfg.Asr.Model = incoming.Model;
     cfg.Asr.SpeakerDiarization = incoming.SpeakerDiarization;
-    logger.LogInformation("Settings updated: asr={Enabled}", cfg.Asr.Enabled);
+    logger.LogInformation("Settings updated: asr={Enabled}, auto={Auto}",
+        cfg.Asr.Enabled, cfg.Asr.AutoTranscribe);
     return Results.Ok(new { asr = cfg.Asr });
 });
 
