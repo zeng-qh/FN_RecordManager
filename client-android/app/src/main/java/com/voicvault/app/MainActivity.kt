@@ -93,7 +93,7 @@ class MainActivity : AppCompatActivity() {
         val req = PeriodicWorkRequestBuilder<SyncWorker>(15, TimeUnit.MINUTES)
             .setConstraints(constraints)
             // 失败（如断网）后指数退避重试：30s → 60s → 120s …
-            .setBackoffCriteria(BackoffCriteria.EXPONENTIAL, 30, TimeUnit.SECONDS)
+            .setBackoffCriteria(androidx.work.BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
             .build()
         WorkManager.getInstance(this).enqueueUniquePeriodicWork(
             "voicvault-sync", ExistingPeriodicWorkPolicy.UPDATE, req

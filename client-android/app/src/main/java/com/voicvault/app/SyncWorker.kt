@@ -55,7 +55,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             }
             notify("同步完成：成功 $ok，失败 $fail", true)
             // 全部失败（典型场景：断网）→ 交给 WorkManager 按退避策略自动重试
-            return if (fail > 0 && ok == 0) Result.retry() else Result.success()
+            return@withContext if (fail > 0 && ok == 0) Result.retry() else Result.success()
         } catch (e: Exception) {
             notify("同步失败：${e.message}", true)
             Result.retry()
