@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.VoiceVault" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/vv_primary</item>
+        <item name="colorOnPrimary">@color/vv_on_primary</item>
+        <item name="colorPrimaryContainer">@color/vv_primary_container</item>
+        <item name="colorOnPrimaryContainer">@color/vv_on_primary_container</item>
+        <item name="colorSecondary">@color/vv_secondary</item>
+        <item name="colorOnSecondary">@color/vv_on_secondary</item>
+        <item name="colorSurface">@color/vv_surface</item>
+        <item name="colorOnSurface">@color/vv_on_surface</item>
+        <item name="colorOnSurfaceVariant">@color/vv_on_surface_variant</item>
+        <item name="colorOutline">@color/vv_outline</item>
+        <item name="android:windowBackground">@color/vv_bg</item>
+        <item name="android:statusBarColor">@color/vv_bg</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>

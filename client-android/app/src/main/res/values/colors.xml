@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- VoiceVault 主色：靛蓝 -->
+    <color name="vv_primary">#4C5EF2</color>
+    <color name="vv_on_primary">#FFFFFF</color>
+    <color name="vv_primary_container">#E1E4FF</color>
+    <color name="vv_on_primary_container">#0A0F52</color>
+
+    <color name="vv_secondary">#5B5D72</color>
+    <color name="vv_on_secondary">#FFFFFF</color>
+
+    <color name="vv_surface">#FCF8FF</color>
+    <color name="vv_surface_variant">#E3E1EC</color>
+    <color name="vv_on_surface">#1A1B21</color>
+    <color name="vv_on_surface_variant">#46464F</color>
+    <color name="vv_outline">#77767F</color>
+
+    <!-- 页面背景 / 状态色 -->
+    <color name="vv_bg">#F4F5FB</color>
+    <color name="vv_success">#1B873B</color>
+    <color name="vv_warning">#B26B00</color>
+    <color name="vv_error">#B3261E</color>
+</resources>
