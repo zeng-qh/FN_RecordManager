@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Data.Sqlite;
 using System.Security.Cryptography;
 using System.Text;
@@ -26,6 +27,17 @@ builder.Services.AddSingleton<TranscriptionQueue>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<TranscriptionQueue>());
 builder.Services.AddLogging();
 
+// 优雅关闭：给进行中的转写足够时间收尾（默认仅 5s 过短，会被强杀）
+builder.Host.ConfigureHostOptions(o => o.ShutdownTimeout = TimeSpan.FromSeconds(30));
+
+// 大文件上传（长录音）限制：默认 134MB 太小；调到 2GB 并保证流式落盘不占内存
+builder.WebHost.ConfigureKestrel(o => o.Limits.MaxRequestBodySize = 2L * 1024 * 1024 * 1024);
+builder.Services.Configure<FormOptions>(o =>
+{
+    o.MultipartBodyLengthLimit = 2L * 1024 * 1024 * 1024;
+    o.MemoryBufferThreshold = 256 * 1024; // 超过 256KB 即缓冲到磁盘，避免整段录音进内存
+});
+
 var app = builder.Build();
 
 var db = app.Services.GetRequiredService<DbService>();
@@ -34,6 +46,11 @@ var auth = app.Services.GetRequiredService<AuthService>();
 var asr = app.Services.GetRequiredService<AsrClient>();
 var queue = app.Services.GetRequiredService<TranscriptionQueue>();
 var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("VoiceVault");
+
+// 优雅关闭日志：便于确认容器 stop 时资源已正确释放
+var lifetime = app.Lifetime;
+lifetime.ApplicationStopping.Register(() => logger.LogInformation("Application stopping…"));
+lifetime.ApplicationStopped.Register(() => logger.LogInformation("Application stopped; SQLite connections released."));
 
 // 鉴权中间件：除 /api/health 外的所有 /api/* 均需 Bearer Token
 app.Use(async (ctx, next) =>

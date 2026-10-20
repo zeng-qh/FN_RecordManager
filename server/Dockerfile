@@ -11,6 +11,10 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 ENV DOTNET_RUNNING_IN_CONTAINER=1 \
     DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+    DOTNET_GCHeapHardLimitPercent=70 \
+    DOTNET_gcServer=0 \
+    DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 \
+    DOTNET_EnableDiagnostics=0 \
     VAULT_DATADIR=/data \
     VAULT_PORT=8080 \
     VAULT_BIND=0.0.0.0

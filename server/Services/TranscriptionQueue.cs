@@ -13,6 +13,7 @@ public class TranscriptionQueue : BackgroundService
     private readonly Channel<long> _channel = Channel.CreateUnbounded<long>(
         new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
 
+    private readonly CancellationTokenSource _cts = new();
     private readonly DbService _db;
     private readonly AsrClient _asr;
     private readonly VaultConfig _cfg;
@@ -41,12 +42,12 @@ public class TranscriptionQueue : BackgroundService
             {
                 try
                 {
-                    await TranscribeAsync(id, stoppingToken);
+                    await TranscribeAsync(id, _cts.Token);
                 }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                catch (OperationCanceledException) when (_cts.IsCancellationRequested)
                 {
-                    _db.UpdateTranscript(id, "", "error", null);
-                    throw;
+                    // 停机取消：状态已是 pending，无需回滚
+                    _logger.LogInformation("Transcribe cancelled id={Id} (shutdown)", id);
                 }
                 catch (Exception ex)
                 {
@@ -57,8 +58,20 @@ public class TranscriptionQueue : BackgroundService
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
-            // 正常停机
+            // 正常停机：队列已 Complete，无更多任务
         }
+    }
+
+    /// <summary>
+    /// 优雅停止：先标记 Channel 完成（排空已入队任务），再取消进行中的转写，
+    /// 最后交由基类在 ShutdownTimeout 内等待 ExecuteAsync 退出。
+    /// </summary>
+    public override async Task StopAsync(CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("Transcription queue stopping: completing writer, cancelling in-flight job…");
+        _channel.Writer.TryComplete();
+        _cts.Cancel();
+        await base.StopAsync(cancellationToken);
     }
 
     /// <summary>执行单条转写并把结果写入磁盘与元数据。</summary>
@@ -78,7 +91,7 @@ public class TranscriptionQueue : BackgroundService
         }
 
         _db.UpdateTranscript(id, "", "pending", null);
-        var result = await _asr.TranscribeAsync(rec.StoredPath);
+        var result = await _asr.TranscribeAsync(rec.StoredPath, ct);
         if (result is null)
         {
             _logger.LogWarning("ASR sidecar returned no result for id={Id}", id);

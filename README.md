@@ -107,6 +107,52 @@ WantedBy=multi-user.target
 
 ---
 
+## 树莓派 4B（2GB 内存）优化部署
+
+本项目针对 2GB 内存的小设备做了针对性优化，开箱即可在树莓派 4B 上稳定运行。
+
+### 内存预算（仅运行服务端，不开转写）
+
+| 组件 | 常驻内存 | 说明 |
+|---|---|---|
+| 服务端 .NET（空闲） | ~50–80 MB | GC 堆硬上限约 600 MB（见下） |
+| 上传 / 播放峰值 | +50–150 MB | 全程流式处理，不把整段录音读进内存 |
+| 系统 + fnOS | ~400–600 MB | 树莓派 OS 基础占用 |
+| ASR 边车（默认关闭） | 0 | 不启动就不占 |
+| **合计（仅服务端）** | **~600–800 MB** | 2GB 设备仍有约 1.2GB 余量 |
+
+> 一旦开启转写（tiny + int8），边车会再占 ~300–500 MB，**small/medium 模型在 2GB 上基本会 OOM，切勿使用**。
+
+### 已内置的优化（无需额外配置）
+
+1. **GC 堆硬上限 + Workstation GC**：镜像内已设 `DOTNET_GCHeapHardLimitPercent=70`、`DOTNET_gcServer=0`，小内存设备不会超额分配堆内存。
+2. **全球化 invariant 模式**：`DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1` 省下 ICU 库约 20–30 MB；不影响中文录音名、转写文本的存储与 `LIKE` 搜索（已实测）。
+3. **SQLite WAL 模式**：写不阻塞读、崩溃恢复更安全；容器 `stop`（SIGTERM）时自动 checkpoint，数据零丢失（已实测 `integrity_check = ok`）。
+4. **流式上传 / 转写**：长录音按流读取落盘，修掉了原先把整段音频读进内存的隐患，从根上避免大文件 OOM。
+5. **大文件上传上限提到 2GB**（原默认仅 134 MB，长录音会被拒）。
+6. **ASR 边车 int8 量化 + 线程限制**：`CT2_NUM_THREADS/OMP/MKL = 3`，避免打满四核、减少内存争抢。
+
+### 部署要点
+
+- 默认 `mem_limit: 896m`，与 GC 堆上限配合，OOM 风险极低。
+- ASR 边车默认**不启动**，需要转写时：
+
+  ```bash
+  docker compose --profile asr up -d
+  ```
+
+  然后在网页端「设置」里打开 ASR 与自动转写即可。
+- 树莓派上 `VAULT_ASR_MODEL` 保持 `tiny`（compose 已默认）；x86 设备可改 `small`/`medium`。
+
+### 优雅关闭
+
+`docker stop` 会向进程发 SIGTERM，服务端已配置：
+- `ShutdownTimeout = 30s`（默认仅 5s，长转写会被强杀）；
+- 停止时先排空转写队列、取消进行中的任务，再释放 SQLite 连接；
+- 日志会打印 `Application stopping… / stopped`，方便确认资源已正确释放。
+
+---
+
 ## 二、手机端接入（任选其一）
 
 ### 方式 A：安卓 App（推荐，全自动）

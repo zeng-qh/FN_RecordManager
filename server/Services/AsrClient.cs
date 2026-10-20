@@ -25,18 +25,19 @@ public class AsrResult
 /// </summary>
 public class AsrClient(HttpClient http, VaultConfig cfg)
 {
-    public async Task<AsrResult?> TranscribeAsync(string audioPath)
+    public async Task<AsrResult?> TranscribeAsync(string audioPath, CancellationToken ct = default)
     {
+        // 流式读取音频文件，避免把整段录音读入内存（长录音在树莓派上尤为关键）
+        using var fileStream = File.OpenRead(audioPath);
         using var content = new MultipartFormDataContent();
-        content.Add(new ByteArrayContent(await File.ReadAllBytesAsync(audioPath)),
-            "file", Path.GetFileName(audioPath));
+        content.Add(new StreamContent(fileStream), "file", Path.GetFileName(audioPath));
         content.Add(new StringContent(cfg.Asr.Model), "model");
         content.Add(new StringContent(cfg.Asr.SpeakerDiarization.ToString()), "diarize");
 
         var endpoint = cfg.Asr.Endpoint.TrimEnd('/') + "/transcribe";
-        using var resp = await http.PostAsync(endpoint, content);
+        using var resp = await http.PostAsync(endpoint, content, ct);
         resp.EnsureSuccessStatusCode();
-        var json = await resp.Content.ReadAsStringAsync();
+        var json = await resp.Content.ReadAsStringAsync(ct);
         return JsonSerializer.Deserialize<AsrResult>(json, new JsonSerializerOptions(JsonSerializerDefaults.Web));
     }
 }

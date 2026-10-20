@@ -4,7 +4,10 @@ FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
     ASR_DEVICE=cpu \
-    ASR_COMPUTE=int8
+    ASR_COMPUTE=int8 \
+    CT2_NUM_THREADS=3 \
+    OMP_NUM_THREADS=3 \
+    MKL_NUM_THREADS=3
 
 WORKDIR /app
 COPY requirements.txt .

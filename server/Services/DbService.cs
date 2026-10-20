@@ -16,8 +16,7 @@ public class DbService
         Directory.CreateDirectory(dataDir);
         _conn = $"Data Source={Path.Combine(dataDir, "voicvault.db")}";
 
-        using var c = new SqliteConnection(_conn);
-        c.Open();
+        using var c = OpenConn();
         using var cmd = c.CreateCommand();
         cmd.CommandText = """
             CREATE TABLE IF NOT EXISTS recordings (
@@ -42,10 +41,22 @@ public class DbService
         cmd.ExecuteNonQuery();
     }
 
+    /// <summary>打开连接并应用并发/崩溃安全 PRAGMA（WAL + 同步 + 忙等待）。</summary>
+    private SqliteConnection OpenConn()
+    {
+        var c = new SqliteConnection(_conn);
+        c.Open();
+        using var p = c.CreateCommand();
+        // WAL：写不阻塞读，崩溃恢复更安全；NORMAL 同步在 WAL 下足够安全且更快；
+        // busy_timeout：并发读写（上传写 + 转写写 + 列表读）时等待而非立即报 locked。
+        p.CommandText = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;";
+        p.ExecuteNonQuery();
+        return c;
+    }
+
     public bool ExistsBySha(string device, string sha)
     {
-        using var c = new SqliteConnection(_conn);
-        c.Open();
+        using var c = OpenConn();
         using var cmd = c.CreateCommand();
         cmd.CommandText = "SELECT 1 FROM recordings WHERE device=@d AND sha256=@s LIMIT 1";
         cmd.Parameters.AddWithValue("@d", device);
@@ -55,8 +66,7 @@ public class DbService
 
     public long Upsert(Recording r)
     {
-        using var c = new SqliteConnection(_conn);
-        c.Open();
+        using var c = OpenConn();
         using var cmd = c.CreateCommand();
         cmd.CommandText = """
             INSERT INTO recordings
@@ -91,8 +101,7 @@ public class DbService
 
     public Recording? GetById(long id)
     {
-        using var c = new SqliteConnection(_conn);
-        c.Open();
+        using var c = OpenConn();
         using var cmd = c.CreateCommand();
         cmd.CommandText = "SELECT * FROM recordings WHERE id=@id";
         cmd.Parameters.AddWithValue("@id", id);
@@ -103,8 +112,7 @@ public class DbService
     public List<Recording> List(int page, int pageSize, long from, long to, string? q)
     {
         var items = new List<Recording>();
-        using var c = new SqliteConnection(_conn);
-        c.Open();
+        using var c = OpenConn();
         using var cmd = c.CreateCommand();
 
         var where = BuildWhere(from, to, q, cmd);
@@ -122,8 +130,7 @@ public class DbService
 
     public long Count(long from, long to, string? q)
     {
-        using var c = new SqliteConnection(_conn);
-        c.Open();
+        using var c = OpenConn();
         using var cmd = c.CreateCommand();
         var where = BuildWhere(from, to, q, cmd);
         cmd.CommandText = $"SELECT COUNT(*) FROM recordings {where}";
@@ -132,8 +139,7 @@ public class DbService
 
     public void UpdateTranscript(long id, string path, string status, string? lang)
     {
-        using var c = new SqliteConnection(_conn);
-        c.Open();
+        using var c = OpenConn();
         using var cmd = c.CreateCommand();
         cmd.CommandText = """
             UPDATE recordings SET transcript_status=@ts, transcript_path=@tp, language=@lang
