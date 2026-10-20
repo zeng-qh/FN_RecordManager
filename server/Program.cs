@@ -35,6 +35,8 @@ builder.Services.AddSingleton<TranscriptionQueue>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<TranscriptionQueue>());
 builder.Services.AddSingleton<IdleScheduler>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<IdleScheduler>());
+builder.Services.AddSingleton(sp =>
+    new ChunkedUploadStore(cfg.DataDir, sp.GetRequiredService<ILogger<ChunkedUploadStore>>()));
 builder.Services.AddLogging();
 
 // 优雅关闭：给进行中的转写足够时间收尾（默认仅 5s 过短，会被强杀）
@@ -56,6 +58,7 @@ var auth = app.Services.GetRequiredService<AuthService>();
 var asr = app.Services.GetRequiredService<AsrClient>();
 var queue = app.Services.GetRequiredService<TranscriptionQueue>();
 var idle = app.Services.GetRequiredService<IdleScheduler>();
+var chunks = app.Services.GetRequiredService<ChunkedUploadStore>();
 var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("VoiceVault");
 
 // 优雅关闭日志：便于确认容器 stop 时资源已正确释放
@@ -133,66 +136,9 @@ api.MapPost("/upload", async (HttpContext ctx) =>
 
     try
     {
-        var (storedPath, recordedAt, actualSha, size) =
-            await storage.SaveAsync(file.OpenReadStream(), relPath, expectedSha, mtime);
-
-        var rec = new Recording
-        {
-            Device = device,
-            RelPath = relPath,
-            FileName = Path.GetFileName(relPath),
-            StoredPath = storedPath,
-            Size = size,
-            Mtime = mtime,
-            Sha256 = actualSha,
-            Title = Path.GetFileName(relPath),
-            RecordedAt = recordedAt,
-            TranscriptStatus = "none",
-            CreatedAt = DateTime.UtcNow
-        };
-        var id = db.Upsert(rec);
-        logger.LogInformation("Uploaded {RelPath} -> id={Id} size={Size}", relPath, id, size);
-
-        // 去重命中（device+sha 已存在）时，ON CONFLICT 保留原落盘路径，
-        // 本次刚写入的副本成为孤儿文件，这里清理掉
-        var current = db.GetById(id);
-        if (current is not null && !string.Equals(current.StoredPath, storedPath, StringComparison.Ordinal))
-        {
-            try
-            {
-                File.Delete(storedPath);
-                logger.LogInformation("Dedup hit: removed duplicate copy {Path}", storedPath);
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "Failed to remove duplicate copy {Path}", storedPath);
-            }
-        }
-
-        // 转写触发：按用户设定的模式处理
-        //  - Realtime：上传后立即入队
-        //  - Idle：空闲时段内立即入队，否则标记为 idle 等待调度器在闲时统一处理
-        if (cfg.Asr.Enabled && cfg.Asr.Mode == TranscribeMode.Realtime)
-        {
-            queue.Enqueue(id);
-            logger.LogInformation("Realtime transcribe queued id={Id}", id);
-        }
-        else if (cfg.Asr.Enabled && cfg.Asr.Mode == TranscribeMode.Idle)
-        {
-            if (cfg.Asr.InIdleWindowNow())
-            {
-                queue.Enqueue(id);
-                db.UpdateTranscript(id, "", "pending", null);
-                logger.LogInformation("Idle window active, transcribe queued id={Id}", id);
-            }
-            else
-            {
-                db.UpdateTranscript(id, "", "idle", null);
-                logger.LogInformation("Idle-pending id={Id} (outside idle window)", id);
-            }
-        }
-
-        return Results.Ok(new { id, status = "uploaded", sha = actualSha });
+        var (id, sha) = await CompleteRecordingAsync(
+            file.OpenReadStream(), relPath, device, expectedSha, mtime);
+        return Results.Ok(new { id, status = "uploaded", sha });
     }
     catch (InvalidDataException ex)
     {
@@ -202,6 +148,58 @@ api.MapPost("/upload", async (HttpContext ctx) =>
     catch (Exception ex)
     {
         logger.LogError(ex, "Upload failed");
+        return Results.Problem(ex.Message);
+    }
+});
+
+// ---- 分片上传（网页端断点续传；弱网/大文件中断后仅补传缺失分片）----
+api.MapPost("/upload/init", (UploadInitRequest req) =>
+{
+    if (string.IsNullOrWhiteSpace(req.RelPath) || string.IsNullOrWhiteSpace(req.Device)
+        || req.Size <= 0 || req.ChunkSize <= 0 || req.TotalChunks <= 0)
+        return Results.BadRequest(new { error = "relPath, device, size, chunkSize, totalChunks are required" });
+    if (req.TotalChunks > 100_000)
+        return Results.BadRequest(new { error = "too many chunks" });
+
+    var (uploadId, received) = chunks.Init(
+        req.Device, req.RelPath, req.Mtime, req.Size, req.ChunkSize, req.TotalChunks);
+    logger.LogInformation("Chunk init {RelPath}: session={Id}, resume {N}/{T}",
+        req.RelPath, uploadId, received.Count, req.TotalChunks);
+    return Results.Ok(new { uploadId, received, totalChunks = req.TotalChunks });
+});
+
+api.MapPut("/upload/chunk/{uploadId}/{index:long}", async (HttpContext ctx, string uploadId, long index) =>
+{
+    var err = await chunks.WriteChunkAsync(uploadId, index, ctx.Request.Body, ctx.RequestAborted);
+    if (err is not null) return Results.BadRequest(new { error = err });
+    return Results.Ok(new { index, done = true });
+});
+
+api.MapPost("/upload/complete/{uploadId}", async (string uploadId) =>
+{
+    var (session, missing) = chunks.GetComplete(uploadId);
+    if (session is null)
+        return Results.NotFound(new { error = "session not found" });
+    if (missing.Count > 0)
+        return Results.BadRequest(new { error = "missing chunks", missing });
+
+    try
+    {
+        // 零拷贝拼接流直接交给落盘/去重/入库公共逻辑
+        await using var concat = new ConcatenatedStream(session.PartPaths);
+        var (id, sha) = await CompleteRecordingAsync(
+            concat, session.RelPath, session.Device, "", session.Mtime);
+        chunks.Remove(uploadId); // 成功后清理会话；失败保留分片可重试 complete
+        return Results.Ok(new { id, status = "uploaded", sha });
+    }
+    catch (InvalidDataException ex)
+    {
+        logger.LogWarning(ex, "Chunked upload rejected: {RelPath}", session.RelPath);
+        return Results.BadRequest(new { error = ex.Message });
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Chunked upload complete failed: {RelPath}", session.RelPath);
         return Results.Problem(ex.Message);
     }
 });
@@ -349,6 +347,76 @@ api.MapPut("/settings", (AsrConfig incoming) =>
 
 /// <summary>将小时裁剪到 [0,23] 合法范围。</summary>
 static int ClampHour(int h) => Math.Clamp(h, 0, 23);
+
+/// <summary>
+/// 上传收尾公共逻辑（单请求 multipart 与分片拼接共用）：
+/// 流式落盘算 SHA → 入库去重 → 清理去重孤儿副本 → 按转写时机分流。
+/// 成功返回 (id, sha)；校验失败抛 InvalidDataException，其余异常向上传播。
+/// </summary>
+async Task<(long Id, string Sha)> CompleteRecordingAsync(
+    Stream content, string relPath, string device, string expectedSha, long mtime)
+{
+    var (storedPath, recordedAt, actualSha, size) =
+        await storage.SaveAsync(content, relPath, expectedSha, mtime);
+
+    var rec = new Recording
+    {
+        Device = device,
+        RelPath = relPath,
+        FileName = Path.GetFileName(relPath),
+        StoredPath = storedPath,
+        Size = size,
+        Mtime = mtime,
+        Sha256 = actualSha,
+        Title = Path.GetFileName(relPath),
+        RecordedAt = recordedAt,
+        TranscriptStatus = "none",
+        CreatedAt = DateTime.UtcNow
+    };
+    var id = db.Upsert(rec);
+    logger.LogInformation("Uploaded {RelPath} -> id={Id} size={Size}", relPath, id, size);
+
+    // 去重命中（device+sha 已存在）时，ON CONFLICT 保留原落盘路径，
+    // 本次刚写入的副本成为孤儿文件，这里清理掉
+    var current = db.GetById(id);
+    if (current is not null && !string.Equals(current.StoredPath, storedPath, StringComparison.Ordinal))
+    {
+        try
+        {
+            File.Delete(storedPath);
+            logger.LogInformation("Dedup hit: removed duplicate copy {Path}", storedPath);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to remove duplicate copy {Path}", storedPath);
+        }
+    }
+
+    // 转写触发：按用户设定的模式处理
+    //  - Realtime：上传后立即入队
+    //  - Idle：空闲时段内立即入队，否则标记为 idle 等待调度器在闲时统一处理
+    if (cfg.Asr.Enabled && cfg.Asr.Mode == TranscribeMode.Realtime)
+    {
+        queue.Enqueue(id);
+        logger.LogInformation("Realtime transcribe queued id={Id}", id);
+    }
+    else if (cfg.Asr.Enabled && cfg.Asr.Mode == TranscribeMode.Idle)
+    {
+        if (cfg.Asr.InIdleWindowNow())
+        {
+            queue.Enqueue(id);
+            db.UpdateTranscript(id, "", "pending", null);
+            logger.LogInformation("Idle window active, transcribe queued id={Id}", id);
+        }
+        else
+        {
+            db.UpdateTranscript(id, "", "idle", null);
+            logger.LogInformation("Idle-pending id={Id} (outside idle window)", id);
+        }
+    }
+
+    return (id, actualSha);
+}
 
 app.Run();
 

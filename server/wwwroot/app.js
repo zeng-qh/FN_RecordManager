@@ -354,31 +354,139 @@ async function triggerTranscribe(id) {
   } catch (e) {}
 }
 
-// ---- 网页端上传（多选；device=web，SHA 由服务端流式计算）----
-$("#uploadBtn").onclick = () => $("#uploadInput").click();
-$("#uploadInput").onchange = async (e) => {
-  const files = Array.from(e.target.files || []);
+// ---- 网页端上传（弹层 + 4MB 分片 + 断点续传）----
+// uploadId 由服务端按 (device|relPath|size|mtime) 派生：同一文件中断后重新
+// 上传时 init 返回已收分片，只补缺失部分——刷新页面也不丢进度。
+const CHUNK_SIZE = 4 * 1024 * 1024;
+
+function openUpload() {
+  $("#uploadModal").hidden = false;
+}
+function closeUpload() {
+  $("#uploadModal").hidden = true; // 仅隐藏 UI，后台队列继续跑
+}
+
+$("#uploadBtn").onclick = openUpload;
+$("#closeUpload").onclick = closeUpload;
+$("#uploadModal").addEventListener("click", (e) => {
+  if (e.target.id === "uploadModal") closeUpload();
+});
+
+const dropZone = $("#dropZone");
+dropZone.onclick = () => $("#uploadInput").click();
+dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("drag"); });
+dropZone.addEventListener("dragleave", () => dropZone.classList.remove("drag"));
+dropZone.addEventListener("drop", (e) => {
+  e.preventDefault();
+  dropZone.classList.remove("drag");
+  addUploadItems(Array.from(e.dataTransfer?.files || []));
+});
+$("#uploadInput").onchange = (e) => {
+  addUploadItems(Array.from(e.target.files || []));
   e.target.value = "";
+};
+
+const uploadQueue = []; // {file, el, bar, label, status: pending|uploading|done|failed}
+
+function addUploadItems(files) {
   if (!files.length) return;
-  let ok = 0, fail = 0;
   for (const f of files) {
-    setStatus(`上传中（${ok + fail + 1}/${files.length}）：${f.name}…`);
+    const row = el("div", "upload-item");
+    const info = el("div", "u-info");
+    info.appendChild(el("div", "u-name", escapeHtml(f.name)));
+    info.appendChild(el("div", "u-sub", fmtSize(f.size)));
+    const bar = el("div", "u-bar");
+    const fill = el("div", "u-fill");
+    bar.appendChild(fill);
+    const label = el("div", "u-label", "排队中");
+    row.append(info, bar, label);
+    $("#uploadQueue").appendChild(row);
+    const item = { file: f, fill, label, status: "pending" };
+    uploadQueue.push(item);
+    runUploadItem(item);
+  }
+}
+
+function setItemState(item, cls, text) {
+  item.status = cls;
+  item.label.className = "u-label " + (cls === "done" ? "ok" : cls === "failed" ? "err" : "");
+  item.label.textContent = text;
+}
+
+async function runUploadItem(item) {
+  try {
+    setItemState(item, "uploading", "初始化…");
+    const f = item.file;
+    const totalChunks = Math.ceil(f.size / CHUNK_SIZE) || 1;
+    const mtime = Math.floor((f.lastModified || Date.now()) / 1000);
+
+    // init：命中已有会话时返回已收分片，实现断点续传
+    const initRes = await api("/api/upload/init", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        relPath: f.name, device: "web", mtime,
+        size: f.size, chunkSize: CHUNK_SIZE, totalChunks,
+      }),
+    });
+    if (!initRes.ok) throw new Error("init HTTP " + initRes.status);
+    const init = await initRes.json();
+    const received = new Set(init.received || []);
+    let doneCount = received.size;
+    const drawProgress = () => {
+      const pct = Math.round((doneCount / totalChunks) * 100);
+      item.fill.style.width = pct + "%";
+      setItemState(item, "uploading", `上传中 ${pct}%${received.size ? "（续传）" : ""}`);
+    };
+    drawProgress();
+
+    for (let i = 0; i < totalChunks; i++) {
+      if (received.has(i)) continue; // 断点续传：跳过已传分片
+      const blob = f.slice(i * CHUNK_SIZE, Math.min((i + 1) * CHUNK_SIZE, f.size));
+      await putChunkWithRetry(init.uploadId, i, blob);
+      doneCount += 1;
+      drawProgress();
+    }
+
+    setItemState(item, "uploading", "合并校验…");
+    const compRes = await api(`/api/upload/complete/${init.uploadId}`, { method: "POST" });
+    if (!compRes.ok) {
+      const d = await compRes.json().catch(() => ({}));
+      throw new Error(d.error || "complete HTTP " + compRes.status);
+    }
+    item.fill.style.width = "100%";
+    setItemState(item, "done", "✓ 已上传" + (received.size ? "（断点续传完成）" : ""));
+    setStatus(`已上传：${f.name}`);
+    loadRecordings(true);
+  } catch (err) {
+    setItemState(item, "failed", "");
+    const retry = el("button", "u-retry", "续传");
+    retry.title = String(err.message || err);
+    retry.onclick = () => {
+      retry.remove();
+      runUploadItem(item); // 重新 init 即从断点继续
+    };
+    item.label.appendChild(retry);
+    setStatus(`上传中断：${item.file.name}，可点「续传」从断点继续。`);
+  }
+}
+
+async function putChunkWithRetry(uploadId, index, blob, retries = 3) {
+  for (let attempt = 0; ; attempt++) {
     try {
-      const fd = new FormData();
-      fd.append("relPath", f.name);
-      fd.append("device", "web");
-      fd.append("sha256", ""); // 浏览器算大文件哈希代价高，留空由服务端流式计算并存库
-      fd.append("mtime", Math.floor((f.lastModified || Date.now()) / 1000));
-      fd.append("file", f);
-      const res = await api("/api/upload", { method: "POST", body: fd });
-      if (res.ok) ok += 1; else fail += 1;
+      const res = await api(`/api/upload/chunk/${uploadId}/${index}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: blob,
+      });
+      if (!res.ok) throw new Error("chunk HTTP " + res.status);
+      return await res.json();
     } catch (err) {
-      fail += 1;
+      if (attempt >= retries) throw err;
+      await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt)); // 指数退避 1s/2s/4s
     }
   }
-  setStatus(`网页上传完成：成功 ${ok}，失败 ${fail}。转写时机见设置（闲时模式下会等到空闲时段）。`);
-  loadRecordings(true);
-};
+}
 
 // ---- 删除录音（详情页）----
 async function deleteFromDetail() {

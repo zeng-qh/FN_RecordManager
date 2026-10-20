@@ -124,6 +124,29 @@ main { flex: 1; padding: 20px; max-width: 900px; width: 100%; margin: 0 auto; }
 .idle-sep { color: var(--muted); }
 .idle-preview { margin-top: 8px; font-size: 12px; color: var(--accent-2); }
 
+/* 网页上传弹层（分片断点续传） */
+.drop-zone {
+  margin: 8px 0; padding: 26px 14px; text-align: center;
+  border: 2px dashed var(--border); border-radius: 12px;
+  background: var(--panel-2); cursor: pointer; transition: border-color .15s, background .15s;
+}
+.drop-zone.drag { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.drop-hint { color: var(--muted); font-size: 13px; line-height: 1.7; }
+.drop-hint small { font-size: 11px; }
+.upload-queue { max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+.upload-item { padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; }
+.u-name { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.u-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.u-bar { height: 6px; margin-top: 8px; border-radius: 3px; background: var(--panel-2); overflow: hidden; }
+.u-fill { height: 100%; width: 0; background: var(--accent); border-radius: 3px; transition: width .2s; }
+.u-label { font-size: 11px; color: var(--muted); margin-top: 5px; }
+.u-label.ok { color: var(--accent-2); }
+.u-label.err { color: var(--danger); }
+.u-retry {
+  margin-left: 8px; padding: 2px 10px; font-size: 11px; cursor: pointer;
+  border: 1px solid var(--danger); border-radius: 8px; background: transparent; color: var(--danger);
+}
+
 .item .ops { display: flex; gap: 6px; flex-shrink: 0; }
 .item .ops button {
   background: var(--panel-2); border: 1px solid var(--border);

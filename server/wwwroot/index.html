@@ -20,8 +20,6 @@
       <button id="uploadBtn" title="上传录音">⬆️</button>
       <button id="refresh" title="刷新">🔄</button>
       <button id="settingsBtn" title="设置">⚙️</button>
-      <input id="uploadInput" type="file" multiple hidden
-             accept="audio/*,.m4a,.mp3,.wav,.amr,.aac,.ogg,.flac" />
     </div>
   </header>
 
@@ -34,6 +32,25 @@
     <div class="nowplaying" id="nowPlaying">未在播放</div>
     <audio id="audio" controls preload="metadata"></audio>
   </footer>
+
+  <!-- 上传弹层：拖拽/多选，4MB 分片断点续传 -->
+  <div id="uploadModal" class="modal" hidden>
+    <div class="modal-card">
+      <h2>上传录音</h2>
+      <div id="dropZone" class="drop-zone">
+        <div class="drop-hint">
+          拖拽音频文件到此处，或点击选择<br />
+          <small>支持多选 · 断网 / 中断后自动从断点续传，无需重传整个文件</small>
+        </div>
+        <input id="uploadInput" type="file" multiple hidden
+               accept="audio/*,.m4a,.mp3,.wav,.amr,.aac,.ogg,.flac" />
+      </div>
+      <div id="uploadQueue" class="upload-queue"></div>
+      <div class="modal-actions">
+        <button id="closeUpload">关闭</button>
+      </div>
+    </div>
+  </div>
 
   <!-- 设置弹窗 -->
   <div id="settingsModal" class="modal" hidden>
