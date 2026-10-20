@@ -137,6 +137,47 @@ public class DbService
         return Convert.ToInt64(cmd.ExecuteScalar());
     }
 
+    /// <summary>返回所有处于「待闲时」状态（transcript_status='idle'）的录音 id，供闲时调度器批量入队。</summary>
+    public List<long> GetIdlePendingIds()
+    {
+        var ids = new List<long>();
+        using var c = OpenConn();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = "SELECT id FROM recordings WHERE transcript_status='idle' ORDER BY id";
+        using var r = cmd.ExecuteReader();
+        while (r.Read()) ids.Add(r.GetInt64(0));
+        return ids;
+    }
+
+    /// <summary>返回所有未完成转写的录音 id（none / idle / error），供「全部转写」批量入队。</summary>
+    public List<long> GetTranscribableIds()
+    {
+        var ids = new List<long>();
+        using var c = OpenConn();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = """
+            SELECT id FROM recordings
+            WHERE transcript_status IS NULL OR transcript_status NOT IN ('done','pending')
+            ORDER BY id
+            """;
+        using var r = cmd.ExecuteReader();
+        while (r.Read()) ids.Add(r.GetInt64(0));
+        return ids;
+    }
+
+    /// <summary>删除一条录音记录并返回其元数据（调用方负责删文件）；不存在返回 null。</summary>
+    public Recording? DeleteById(long id)
+    {
+        var rec = GetById(id);
+        if (rec is null) return null;
+        using var c = OpenConn();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = "DELETE FROM recordings WHERE id=@id";
+        cmd.Parameters.AddWithValue("@id", id);
+        cmd.ExecuteNonQuery();
+        return rec;
+    }
+
     public void UpdateTranscript(long id, string path, string status, string? lang)
     {
         using var c = OpenConn();

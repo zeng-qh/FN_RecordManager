@@ -106,6 +106,23 @@ main { flex: 1; padding: 20px; max-width: 900px; width: 100%; margin: 0 auto; }
 .badge.done { color: var(--accent-2); border-color: var(--accent-2); }
 .badge.pending { color: #d29922; border-color: #d29922; }
 .badge.error { color: var(--danger); border-color: var(--danger); }
+.badge.idle { color: #6b8cff; border-color: #6b8cff; }
+
+/* 闲时转写窗口设置 */
+.idle-window {
+  margin: 6px 0 4px; padding: 10px 12px;
+  border: 1px dashed var(--border); border-radius: 10px;
+  background: var(--panel-2);
+}
+.idle-hint { font-size: 12px; color: var(--muted); margin-bottom: 8px; line-height: 1.5; }
+.idle-range { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.idle-range label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+.idle-range input[type="number"] {
+  width: 56px; padding: 4px 6px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--panel); color: var(--text);
+}
+.idle-sep { color: var(--muted); }
+.idle-preview { margin-top: 8px; font-size: 12px; color: var(--accent-2); }
 
 .item .ops { display: flex; gap: 6px; flex-shrink: 0; }
 .item .ops button {
@@ -225,6 +242,12 @@ main { flex: 1; padding: 20px; max-width: 900px; width: 100%; margin: 0 auto; }
 }
 .d-download { display: inline-block; margin-top: 12px; color: var(--accent); text-decoration: none; font-size: 13px; }
 .d-download:hover { text-decoration: underline; }
+.d-delete {
+  display: block; margin-top: 16px; padding: 8px 12px;
+  border: 1px solid var(--danger); border-radius: 10px;
+  background: transparent; color: var(--danger); font-size: 13px; cursor: pointer;
+}
+.d-delete:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); }
 
 .d-trans-head {
   display: flex; justify-content: space-between; align-items: center;

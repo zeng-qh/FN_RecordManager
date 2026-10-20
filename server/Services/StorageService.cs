@@ -59,7 +59,10 @@ public class StorageService
         var size = fs.Length;
         var actualSha = Convert.ToHexString(shaAlg.Hash!).ToLowerInvariant();
 
-        if (!string.Equals(actualSha, expectedSha, StringComparison.OrdinalIgnoreCase))
+        // 客户端未上报校验值时（如网页端浏览器上传）跳过比对，
+        // 但服务端仍计算真实 SHA 存库，(device, sha256) 去重不受影响。
+        var skipVerify = string.IsNullOrWhiteSpace(expectedSha);
+        if (!skipVerify && !string.Equals(actualSha, expectedSha, StringComparison.OrdinalIgnoreCase))
         {
             File.Delete(tmpPath);
             throw new InvalidDataException(

@@ -21,6 +21,11 @@ services:
       - VAULT_BIND=0.0.0.0
       # 树莓派 2GB 默认用 tiny 模型（ASR 开启时）；x86 可改 small / medium
       - VAULT_ASR__MODEL=${VAULT_ASR_MODEL:-tiny}
+      # 转写时机：Off（关闭，仅手动）/ Realtime（上传即转）/ Idle（闲时转写）。
+      # 闲时模式配合下面两个小时变量，把转写压在空闲时段，降低白天 NAS 负载。
+      - VAULT_ASR__MODE=${VAULT_ASR_MODE:-Off}
+      - VAULT_ASR__IDLESTARTHOUR=${VAULT_ASR_IDLESTARTHOUR:-22}
+      - VAULT_ASR__IDLEENDHOUR=${VAULT_ASR_IDLEENDHOUR:-7}
     # 内存硬上限：2GB Pi 上留足系统与其他服务，避免 OOM。
     # 与镜像内 DOTNET_GCHeapHardLimitPercent=70 配合，GC 堆上限约 600MB。
     mem_limit: 896m

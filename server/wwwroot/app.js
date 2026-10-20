@@ -119,6 +119,7 @@ function statusBadge(status) {
   if (status === "done") return '<span class="badge done">已转写</span>';
   if (status === "pending") return '<span class="badge pending">转写中</span>';
   if (status === "error") return '<span class="badge error">转写失败</span>';
+  if (status === "idle") return '<span class="badge idle">待闲时转写</span>';
   return '<span class="badge">未转写</span>';
 }
 
@@ -234,10 +235,12 @@ async function loadDetailTranscript(id) {
       if (st === "pending") {
         box.innerHTML = '<div class="d-loading">⏳ 转写进行中，完成后自动显示…</div>';
         startDetailPoll(id);
+      } else if (st === "idle") {
+        box.innerHTML = '<div class="d-empty">已加入闲时转写队列。<br/>将在设定的空闲时段（服务器本地时区）内自动转写，或点右上「立即转写」马上处理。</div>';
       } else if (st === "error") {
         box.innerHTML = '<div class="d-empty">上次转写失败。可点右上「立即转写」重试。</div>';
       } else {
-        box.innerHTML = '<div class="d-empty">尚未转写。<br/>可在设置里开启「自动转写新录音」，或点右上「立即转写」。</div>';
+        box.innerHTML = '<div class="d-empty">尚未转写。<br/>可在设置里开启「实时/闲时转写」，或点右上「立即转写」。</div>';
       }
       return;
     }
@@ -351,6 +354,73 @@ async function triggerTranscribe(id) {
   } catch (e) {}
 }
 
+// ---- 网页端上传（多选；device=web，SHA 由服务端流式计算）----
+$("#uploadBtn").onclick = () => $("#uploadInput").click();
+$("#uploadInput").onchange = async (e) => {
+  const files = Array.from(e.target.files || []);
+  e.target.value = "";
+  if (!files.length) return;
+  let ok = 0, fail = 0;
+  for (const f of files) {
+    setStatus(`上传中（${ok + fail + 1}/${files.length}）：${f.name}…`);
+    try {
+      const fd = new FormData();
+      fd.append("relPath", f.name);
+      fd.append("device", "web");
+      fd.append("sha256", ""); // 浏览器算大文件哈希代价高，留空由服务端流式计算并存库
+      fd.append("mtime", Math.floor((f.lastModified || Date.now()) / 1000));
+      fd.append("file", f);
+      const res = await api("/api/upload", { method: "POST", body: fd });
+      if (res.ok) ok += 1; else fail += 1;
+    } catch (err) {
+      fail += 1;
+    }
+  }
+  setStatus(`网页上传完成：成功 ${ok}，失败 ${fail}。转写时机见设置（闲时模式下会等到空闲时段）。`);
+  loadRecordings(true);
+};
+
+// ---- 删除录音（详情页）----
+async function deleteFromDetail() {
+  if (!detailId) return;
+  const id = detailId;
+  if (!confirm("确定删除这条录音？录音文件与文字稿将一并删除，不可恢复。")) return;
+  try {
+    const res = await api(`/api/recordings/${id}`, { method: "DELETE" });
+    if (res.ok) {
+      closeDetail();
+      setStatus("录音已删除。");
+      loadRecordings(true);
+    } else {
+      const d = await res.json().catch(() => ({}));
+      alert("删除失败：" + (d.error || res.status));
+    }
+  } catch (e) {
+    alert("删除失败：" + e.message);
+  }
+}
+
+// ---- 批量转写（设置页）----
+async function transcribeAll() {
+  if (!state.asrEnabled) {
+    alert("请先勾选「启用语音转文字」并保存。");
+    return;
+  }
+  if (!confirm("把所有未转写的录音一次性加入队列？将串行执行（闲时模式下也会立即开始）。")) return;
+  try {
+    const res = await api("/api/transcribe/pending", { method: "POST" });
+    if (res.ok) {
+      const d = await res.json();
+      setStatus(`已把 ${d.queued} 条录音加入转写队列。`);
+      closeSettings();
+      loadRecordings(true);
+    } else {
+      const d = await res.json().catch(() => ({}));
+      alert("无法批量转写：" + (d.error || res.status));
+    }
+  } catch (e) {}
+}
+
 // ---- 分页 ----
 function ensureLoadMore(total, loaded) {
   removeLoadMore();
@@ -393,11 +463,43 @@ async function refreshSettingsForm() {
     const d = await res.json();
     state.asrEnabled = !!(d.asr && d.asr.enabled);
     $("#cfgAsrEnabled").checked = state.asrEnabled;
-    $("#cfgAsrAuto").checked = !!(d.asr && d.asr.autoTranscribe);
+    const mode = (d.asr?.mode || "Off").toString().toLowerCase();
+    $("#cfgAsrMode").value = ["off", "realtime", "idle"].includes(mode) ? mode : "off";
+    $("#cfgAsrIdleStart").value = d.asr?.idleStartHour ?? 22;
+    $("#cfgAsrIdleEnd").value = d.asr?.idleEndHour ?? 7;
     $("#cfgAsrEndpoint").value = d.asr?.endpoint || "";
     $("#cfgAsrModel").value = d.asr?.model || "small";
     $("#cfgAsrDiarize").checked = !!(d.asr && d.asr.speakerDiarization);
+    syncIdleWindowBox();
   } catch (e) {}
+}
+
+// 模式选择联动：仅闲时模式显示时间段输入
+function syncIdleWindowBox() {
+  const isIdle = $("#cfgAsrMode").value === "idle";
+  $("#idleWindowBox").hidden = !isIdle;
+  if (isIdle) updateIdlePreview();
+}
+
+// 把起止小时渲染成人类可读的空闲时段（支持跨午夜）
+function updateIdlePreview() {
+  const s = Number($("#cfgAsrIdleStart").value);
+  const e = Number($("#cfgAsrIdleEnd").value);
+  const box = $("#idlePreview");
+  if (!Number.isFinite(s) || !Number.isFinite(e) || s < 0 || s > 23 || e < 0 || e > 23) {
+    box.textContent = "小时需在 0–23 之间";
+    return;
+  }
+  if (s === e) {
+    box.textContent = "起始与结束相同，等于不限制时段（等同于实时转写）";
+    return;
+  }
+  const fmt = (h) => String(h).padStart(2, "0") + ":00";
+  if (s < e) {
+    box.textContent = `每天 ${fmt(s)} – ${fmt(e)} 转写`;
+  } else {
+    box.textContent = `每天 ${fmt(s)} – 次日 ${fmt(e)} 转写（跨午夜）`;
+  }
 }
 
 async function saveSettings() {
@@ -406,10 +508,14 @@ async function saveSettings() {
   localStorage.setItem(LS_SERVER, state.server);
   localStorage.setItem(LS_TOKEN, state.token);
 
-  // 把 ASR 配置写回服务端（含自动转写开关）
+  // 把 ASR 配置写回服务端（含转写模式与闲时窗口）
+  const s = Math.max(0, Math.min(23, Number($("#cfgAsrIdleStart").value) || 0));
+  const e = Math.max(0, Math.min(23, Number($("#cfgAsrIdleEnd").value) || 0));
   const asr = {
     enabled: $("#cfgAsrEnabled").checked,
-    autoTranscribe: $("#cfgAsrAuto").checked,
+    mode: $("#cfgAsrMode").value,
+    idleStartHour: s,
+    idleEndHour: e,
     endpoint: $("#cfgAsrEndpoint").value.trim(),
     model: $("#cfgAsrModel").value,
     speakerDiarization: $("#cfgAsrDiarize").checked,
@@ -450,6 +556,11 @@ $("#refresh").onclick = () => loadRecordings(true);
 $("#settingsBtn").onclick = () => openSettings();
 $("#saveSettings").onclick = saveSettings;
 $("#testConn").onclick = testConnection;
+$("#cfgAsrMode").onchange = syncIdleWindowBox;
+$("#cfgAsrIdleStart").oninput = updateIdlePreview;
+$("#cfgAsrIdleEnd").oninput = updateIdlePreview;
+$("#dDelete").onclick = deleteFromDetail;
+$("#transcribeAllBtn").onclick = transcribeAll;
 
 // 详情弹层事件
 $("#dClose").onclick = closeDetail;

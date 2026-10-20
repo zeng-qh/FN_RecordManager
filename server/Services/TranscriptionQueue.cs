@@ -34,8 +34,8 @@ public class TranscriptionQueue : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _logger.LogInformation("Transcription queue started (asr enabled={Enabled}, auto={Auto})",
-            _cfg.Asr.Enabled, _cfg.Asr.AutoTranscribe);
+        _logger.LogInformation("Transcription queue started (asr enabled={Enabled}, mode={Mode})",
+            _cfg.Asr.Enabled, _cfg.Asr.Mode);
         try
         {
             await foreach (var id in _channel.Reader.ReadAllAsync(stoppingToken))

@@ -15,16 +15,26 @@ var cfg = new VaultConfig();
 builder.Configuration.Bind(cfg);
 cfg.DataDir = Path.GetFullPath(cfg.DataDir);
 
+// 网页端设置持久化：settings.json 存在时覆盖 ASR 配置（网页端保存 > 部署默认值）
+var settingsStore = new SettingsStore(cfg.DataDir);
+if (settingsStore.Load() is { } savedAsr)
+{
+    cfg.Asr = savedAsr;
+}
+
 builder.WebHost.UseUrls($"http://{cfg.Bind}:{cfg.Port}");
 
 // 依赖注入
 builder.Services.AddSingleton(cfg);
+builder.Services.AddSingleton(settingsStore);
 builder.Services.AddSingleton(new DbService(cfg.DataDir));
 builder.Services.AddSingleton(new StorageService(cfg.DataDir));
 builder.Services.AddSingleton(new AuthService(cfg.Token));
 builder.Services.AddHttpClient<AsrClient>();
 builder.Services.AddSingleton<TranscriptionQueue>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<TranscriptionQueue>());
+builder.Services.AddSingleton<IdleScheduler>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<IdleScheduler>());
 builder.Services.AddLogging();
 
 // 优雅关闭：给进行中的转写足够时间收尾（默认仅 5s 过短，会被强杀）
@@ -45,6 +55,7 @@ var storage = app.Services.GetRequiredService<StorageService>();
 var auth = app.Services.GetRequiredService<AuthService>();
 var asr = app.Services.GetRequiredService<AsrClient>();
 var queue = app.Services.GetRequiredService<TranscriptionQueue>();
+var idle = app.Services.GetRequiredService<IdleScheduler>();
 var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("VoiceVault");
 
 // 优雅关闭日志：便于确认容器 stop 时资源已正确释放
@@ -142,11 +153,43 @@ api.MapPost("/upload", async (HttpContext ctx) =>
         var id = db.Upsert(rec);
         logger.LogInformation("Uploaded {RelPath} -> id={Id} size={Size}", relPath, id, size);
 
-        // 自动转写：ASR 已启用且允许自动转写时，入后台队列
-        if (cfg.Asr.Enabled && cfg.Asr.AutoTranscribe)
+        // 去重命中（device+sha 已存在）时，ON CONFLICT 保留原落盘路径，
+        // 本次刚写入的副本成为孤儿文件，这里清理掉
+        var current = db.GetById(id);
+        if (current is not null && !string.Equals(current.StoredPath, storedPath, StringComparison.Ordinal))
+        {
+            try
+            {
+                File.Delete(storedPath);
+                logger.LogInformation("Dedup hit: removed duplicate copy {Path}", storedPath);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to remove duplicate copy {Path}", storedPath);
+            }
+        }
+
+        // 转写触发：按用户设定的模式处理
+        //  - Realtime：上传后立即入队
+        //  - Idle：空闲时段内立即入队，否则标记为 idle 等待调度器在闲时统一处理
+        if (cfg.Asr.Enabled && cfg.Asr.Mode == TranscribeMode.Realtime)
         {
             queue.Enqueue(id);
-            logger.LogInformation("Auto-transcribe queued id={Id}", id);
+            logger.LogInformation("Realtime transcribe queued id={Id}", id);
+        }
+        else if (cfg.Asr.Enabled && cfg.Asr.Mode == TranscribeMode.Idle)
+        {
+            if (cfg.Asr.InIdleWindowNow())
+            {
+                queue.Enqueue(id);
+                db.UpdateTranscript(id, "", "pending", null);
+                logger.LogInformation("Idle window active, transcribe queued id={Id}", id);
+            }
+            else
+            {
+                db.UpdateTranscript(id, "", "idle", null);
+                logger.LogInformation("Idle-pending id={Id} (outside idle window)", id);
+            }
         }
 
         return Results.Ok(new { id, status = "uploaded", sha = actualSha });
@@ -235,8 +278,42 @@ api.MapPost("/recordings/{id:long}/transcribe", (long id) =>
     var rec = db.GetById(id);
     if (rec is null) return Results.NotFound(new { error = "not found" });
 
+    // 手动触发总是立即执行（不受闲时窗口限制），并即时反馈状态。
+    db.UpdateTranscript(id, "", "pending", null);
     queue.Enqueue(id);
     return Results.Accepted(null, new { status = "pending" });
+});
+
+// 批量转写：把所有未完成（未转写/待闲时/失败）的录音一次性入队，串行消化
+api.MapPost("/transcribe/pending", () =>
+{
+    if (!cfg.Asr.Enabled)
+        return Results.BadRequest(new { error = "asr disabled", asr = false });
+
+    var ids = db.GetTranscribableIds();
+    foreach (var id in ids)
+    {
+        db.UpdateTranscript(id, "", "pending", null);
+        queue.Enqueue(id);
+    }
+    logger.LogInformation("Bulk transcribe queued: {Count} recordings", ids.Count);
+    return Results.Accepted(null, new { queued = ids.Count });
+});
+
+// 删除录音：移除元数据行，并清理落盘文件与文字稿 JSON
+api.MapDelete("/recordings/{id:long}", (long id) =>
+{
+    var rec = db.DeleteById(id);
+    if (rec is null) return Results.NotFound(new { error = "not found" });
+
+    foreach (var p in new[] { rec.StoredPath, rec.TranscriptPath })
+    {
+        if (string.IsNullOrWhiteSpace(p) || !File.Exists(p)) continue;
+        try { File.Delete(p); }
+        catch (Exception ex) { logger.LogWarning(ex, "Failed to delete file {Path}", p); }
+    }
+    logger.LogInformation("Deleted recording id={Id} relPath={RelPath}", id, rec.RelPath);
+    return Results.Ok(new { deleted = id });
 });
 
 // 设置（ASR 开关等，内存级；可加持久化）
@@ -249,14 +326,29 @@ api.MapGet("/settings", () => Results.Ok(new
 api.MapPut("/settings", (AsrConfig incoming) =>
 {
     cfg.Asr.Enabled = incoming.Enabled;
-    cfg.Asr.AutoTranscribe = incoming.AutoTranscribe;
+    cfg.Asr.Mode = incoming.Mode;
+    cfg.Asr.IdleStartHour = ClampHour(incoming.IdleStartHour);
+    cfg.Asr.IdleEndHour = ClampHour(incoming.IdleEndHour);
     cfg.Asr.Endpoint = incoming.Endpoint;
     cfg.Asr.Model = incoming.Model;
     cfg.Asr.SpeakerDiarization = incoming.SpeakerDiarization;
-    logger.LogInformation("Settings updated: asr={Enabled}, auto={Auto}",
-        cfg.Asr.Enabled, cfg.Asr.AutoTranscribe);
+
+    // 持久化到 settings.json：重启容器配置不丢
+    try { settingsStore.Save(cfg.Asr); }
+    catch (Exception ex) { logger.LogWarning(ex, "Failed to persist settings"); }
+
+    logger.LogInformation(
+        "Settings updated: asr={Enabled}, mode={Mode}, idle={S}-{E}",
+        cfg.Asr.Enabled, cfg.Asr.Mode, cfg.Asr.IdleStartHour, cfg.Asr.IdleEndHour);
+
+    // 保存后立即巡检一次：若当前正处闲时窗口，积压无需等满 1 分钟
+    idle.TriggerNow();
+
     return Results.Ok(new { asr = cfg.Asr });
 });
+
+/// <summary>将小时裁剪到 [0,23] 合法范围。</summary>
+static int ClampHour(int h) => Math.Clamp(h, 0, 23);
 
 app.Run();
 

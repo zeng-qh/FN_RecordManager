@@ -17,8 +17,11 @@
     </div>
     <div class="actions">
       <input id="search" type="search" placeholder="搜索文件名 / 标题…" />
+      <button id="uploadBtn" title="上传录音">⬆️</button>
       <button id="refresh" title="刷新">🔄</button>
       <button id="settingsBtn" title="设置">⚙️</button>
+      <input id="uploadInput" type="file" multiple hidden
+             accept="audio/*,.m4a,.mp3,.wav,.amr,.aac,.ogg,.flac" />
     </div>
   </header>
 
@@ -47,9 +50,22 @@
       <label class="row">
         <input id="cfgAsrEnabled" type="checkbox" /> 启用语音转文字
       </label>
-      <label class="row">
-        <input id="cfgAsrAuto" type="checkbox" /> 自动转写新录音（上传后后台排队）
+      <label>转写时机
+        <select id="cfgAsrMode">
+          <option value="off">关闭（仅手动转写）</option>
+          <option value="realtime">实时转写（上传后立即）</option>
+          <option value="idle">闲时转写（设定空闲时段）</option>
+        </select>
       </label>
+      <div id="idleWindowBox" class="idle-window" hidden>
+        <div class="idle-hint">每天仅在以下空闲时段内转写，其余时间只备份不转写（按服务器本地时区）。</div>
+        <div class="idle-range">
+          <label>起始 <input id="cfgAsrIdleStart" type="number" min="0" max="23" step="1" value="22" /> 时</label>
+          <span class="idle-sep">→</span>
+          <label>结束 <input id="cfgAsrIdleEnd" type="number" min="0" max="23" step="1" value="7" /> 时</label>
+        </div>
+        <div id="idlePreview" class="idle-preview"></div>
+      </div>
       <label>ASR 边车地址
         <input id="cfgAsrEndpoint" type="text" placeholder="http://localhost:8000" />
       </label>
@@ -65,6 +81,7 @@
         <input id="cfgAsrDiarize" type="checkbox" /> 说话人分段
       </label>
       <div class="modal-actions">
+        <button id="transcribeAllBtn">转写全部未处理</button>
         <button id="testConn">测试连接</button>
         <button id="saveSettings" class="primary">保存</button>
       </div>
@@ -92,6 +109,7 @@
           </div>
           <div id="dInfo" class="d-info-card"></div>
           <a id="dDownload" class="d-download" download>⬇ 下载原文件</a>
+          <button id="dDelete" class="d-delete">🗑 删除录音</button>
         </section>
         <section class="d-right">
           <div class="d-trans-head">
