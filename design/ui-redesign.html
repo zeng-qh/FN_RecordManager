@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>VoiceVault 全新界面设计原型 · UI Designer</title>
+<style>
+/* ============================================================
+   VoiceVault 设计令牌（Design Tokens）— 浅色 / 深色双主题
+   对比度均满足 WCAG AA（正文 ≥ 4.5:1）
+   ============================================================ */
+:root{
+  --bg:#F4F6FB; --surface:#FFFFFF; --surface-2:#EDF1F8; --surface-3:#E4E9F4;
+  --text:#171E2E; --muted:#66718A; --border:#E3E8F2;
+  --primary:#3D6DF5; --primary-weak:#E6EDFF; --on-primary:#FFFFFF;
+  --accent:#12B5A4; --accent-weak:#DCF5F1;
+  --amber:#C97F16; --amber-weak:#FCEFD8;
+  --danger:#DE4448; --danger-weak:#FCE3E4;
+  --shadow:0 2px 10px rgba(23,30,46,.07), 0 1px 3px rgba(23,30,46,.05);
+  --shadow-lg:0 12px 40px rgba(23,30,46,.16);
+  --radius-card:16px; --radius-ctl:10px;
+  --font:-apple-system,"PingFang SC","HarmonyOS Sans SC","MiSans","Noto Sans SC","Microsoft YaHei",system-ui,sans-serif;
+}
+[data-theme="dark"]{
+  --bg:#0D1220; --surface:#151C2E; --surface-2:#1B2438; --surface-3:#232E48;
+  --text:#E9EEF9; --muted:#93A0B8; --border:#26304A;
+  --primary:#7B96FF; --primary-weak:#22304F; --on-primary:#0D1220;
+  --accent:#2BD9C7; --accent-weak:#12332F;
+  --amber:#F0B34E; --amber-weak:#3A2F17;
+  --danger:#FF6B6E; --danger-weak:#3B1D1F;
+  --shadow:0 2px 10px rgba(0,0,0,.35), 0 1px 3px rgba(0,0,0,.3);
+  --shadow-lg:0 16px 48px rgba(0,0,0,.5);
+}
+*{box-sizing:border-box; margin:0; padding:0;}
+html{-webkit-text-size-adjust:100%;}
+body{background:var(--bg); color:var(--text); font-family:var(--font); font-size:15px; line-height:1.55; transition:background .25s,color .25s;}
+button{font-family:var(--font); cursor:pointer;}
+:focus-visible{outline:2px solid var(--primary); outline-offset:2px; border-radius:6px;}
+@media (prefers-reduced-motion:reduce){ *{animation:none!important; transition:none!important;} }
+
+/* ===== 设计稿工具栏（非产品 UI）===== */
+.specbar{position:sticky; top:0; z-index:60; display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  padding:10px 16px; background:var(--surface); border-bottom:1px solid var(--border);}
+.specbar b{font-size:13px;}
+.specbar .tag{font-size:11px; color:var(--muted); background:var(--surface-2); border-radius:999px; padding:3px 10px;}
+.specbar .sp{flex:1;}
+.specbtn{border:1px solid var(--border); background:var(--surface-2); color:var(--text); border-radius:999px; padding:7px 14px; font-size:13px; min-height:34px;}
+.specbtn.on{background:var(--primary); color:var(--on-primary); border-color:var(--primary);}
+
+/* ===== 产品顶栏 ===== */
+.topbar{position:sticky; top:0; z-index:40; display:flex; align-items:center; gap:14px; padding:12px 20px;
+  background:color-mix(in srgb, var(--surface) 86%, transparent); backdrop-filter:blur(12px); border-bottom:1px solid var(--border);}
+.brand{display:flex; align-items:center; gap:10px; min-width:170px;}
+.logo{width:38px; height:38px; border-radius:12px; background:linear-gradient(135deg,var(--primary),var(--accent));
+  display:flex; align-items:center; justify-content:center; box-shadow:var(--shadow);}
+.logo svg{width:20px; height:20px; stroke:#fff; stroke-width:2.4; fill:none; stroke-linecap:round;}
+.brand h1{font-size:16px; font-weight:700; letter-spacing:.5px;}
+.brand small{display:block; font-size:11px; color:var(--muted); font-weight:400;}
+.search{flex:1; max-width:460px; position:relative;}
+.search input{width:100%; height:42px; border-radius:12px; border:1px solid var(--border); background:var(--surface-2);
+  color:var(--text); padding:0 14px 0 40px; font-size:14px;}
+.search svg{position:absolute; left:13px; top:12px; width:17px; height:17px; stroke:var(--muted); stroke-width:2; fill:none;}
+.iconbtn{width:42px; height:42px; border-radius:12px; border:1px solid var(--border); background:var(--surface);
+  color:var(--text); font-size:17px; display:flex; align-items:center; justify-content:center;}
+.iconbtn:hover{background:var(--surface-2);}
+.stat{min-width:120px; text-align:right; font-size:12px; color:var(--muted);}
+.stat b{display:block; font-size:16px; color:var(--text); font-weight:700;}
+
+/* ===== 主区 ===== */
+.main{max-width:860px; margin:0 auto; padding:24px 20px 130px;}
+.dayhead{display:inline-flex; align-items:center; gap:8px; margin:26px 0 12px; padding:5px 14px;
+  background:var(--surface); border:1px solid var(--border); border-radius:999px; font-size:12.5px; color:var(--muted); box-shadow:var(--shadow);}
+.dayhead b{color:var(--text); font-weight:600;}
+.dayhead:first-child{margin-top:6px;}
+
+/* 录音卡片 */
+.card{display:flex; align-items:center; gap:14px; padding:14px 16px; margin-bottom:10px;
+  background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-card);
+  box-shadow:var(--shadow); cursor:pointer; transition:transform .15s, box-shadow .15s, border-color .15s;}
+.card:hover{transform:translateY(-2px); box-shadow:var(--shadow-lg); border-color:color-mix(in srgb,var(--primary) 40%, var(--border));}
+.wave{flex-shrink:0; width:76px; height:52px; border-radius:12px; background:var(--surface-2);
+  display:flex; align-items:center; justify-content:center; gap:2.5px; overflow:hidden; padding:0 8px;}
+.wave i{width:3px; border-radius:2px; background:var(--primary); opacity:.55;}
+.card.playing .wave i{animation:eq 1s ease-in-out infinite;}
+.card.playing .wave i:nth-child(2n){animation-delay:.15s;} .card.playing .wave i:nth-child(3n){animation-delay:.3s;}
+@keyframes eq{0%,100%{transform:scaleY(.5);} 50%{transform:scaleY(1);}}
+.c-info{flex:1; min-width:0;}
+.c-title{font-size:14.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+.c-sub{font-size:12px; color:var(--muted); margin-top:3px; display:flex; align-items:center; gap:6px; flex-wrap:wrap;}
+.dot{width:7px; height:7px; border-radius:50%; flex-shrink:0;}
+.badge{font-size:11px; padding:3px 9px; border-radius:999px; border:1px solid var(--border); color:var(--muted); flex-shrink:0;}
+.badge.done{color:var(--accent); border-color:color-mix(in srgb,var(--accent) 45%, transparent); background:var(--accent-weak);}
+.badge.pending{color:var(--amber); border-color:color-mix(in srgb,var(--amber) 45%, transparent); background:var(--amber-weak);}
+.badge.idle{color:var(--primary); border-color:color-mix(in srgb,var(--primary) 40%, transparent); background:var(--primary-weak);}
+.badge.error{color:var(--danger); border-color:color-mix(in srgb,var(--danger) 45%, transparent); background:var(--danger-weak);}
+.dur{font-size:13px; font-weight:600; font-variant-numeric:tabular-nums; color:var(--muted); flex-shrink:0; min-width:44px; text-align:right;}
+.c-actions{display:flex; gap:6px; flex-shrink:0;}
+.chip{border:1px solid var(--border); background:var(--surface-2); color:var(--text); border-radius:9px; padding:7px 12px; font-size:12px; min-height:34px;}
+.chip:hover{background:var(--surface-3);}
+
+/* 空态/骨架 */
+.skeleton{height:74px; border-radius:var(--radius-card); background:linear-gradient(100deg,var(--surface) 40%,var(--surface-2) 50%,var(--surface) 60%);
+  background-size:200% 100%; animation:shimmer 1.4s infinite; margin-bottom:10px; border:1px solid var(--border);}
+@keyframes shimmer{to{background-position:-200% 0;}}
+
+/* ===== 迷你播放条 ===== */
+.player{position:fixed; left:50%; bottom:22px; transform:translateX(-50%); z-index:45; width:min(680px, calc(100% - 32px));
+  display:flex; align-items:center; gap:12px; padding:10px 14px;
+  background:color-mix(in srgb, var(--surface) 92%, transparent); backdrop-filter:blur(14px);
+  border:1px solid var(--border); border-radius:18px; box-shadow:var(--shadow-lg);}
+.pbtn{width:46px; height:46px; border-radius:50%; border:none; background:var(--primary); color:var(--on-primary);
+  font-size:16px; display:flex; align-items:center; justify-content:center; flex-shrink:0;}
+.pbtn:hover{filter:brightness(1.08);}
+.p-meta{flex:1; min-width:0;}
+.p-title{font-size:13px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+.pwave{display:flex; align-items:center; gap:2px; height:22px; margin-top:4px;}
+.pwave i{flex:1; max-width:6px; border-radius:2px; background:var(--surface-3); transition:background .2s;}
+.pwave i.on{background:var(--primary);}
+.p-time{font-size:11.5px; color:var(--muted); font-variant-numeric:tabular-nums; flex-shrink:0;}
+
+/* ===== 详情抽屉 ===== */
+.scrim{position:fixed; inset:0; background:rgba(10,14,25,.45); z-index:70; opacity:0; pointer-events:none; transition:opacity .2s;}
+.scrim.open{opacity:1; pointer-events:auto;}
+.drawer{position:fixed; top:0; right:0; bottom:0; width:min(460px,100%); z-index:75; display:flex; flex-direction:column;
+  background:var(--bg); border-left:1px solid var(--border); box-shadow:var(--shadow-lg);
+  transform:translateX(102%); transition:transform .28s cubic-bezier(.2,.8,.25,1);}
+.drawer.open{transform:none;}
+.d-head{display:flex; align-items:flex-start; gap:10px; padding:18px 20px 12px;}
+.d-head h2{font-size:17px; line-height:1.35; flex:1;}
+.d-close{width:36px; height:36px; border-radius:10px; border:1px solid var(--border); background:var(--surface); color:var(--text); font-size:14px;}
+.d-body{flex:1; overflow-y:auto; padding:0 20px 28px;}
+.hero{background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-card); padding:18px; box-shadow:var(--shadow);}
+.hero .row{display:flex; align-items:center; gap:12px;}
+.bigpbtn{width:58px; height:58px; border-radius:50%; border:none; background:var(--primary); color:var(--on-primary); font-size:20px; flex-shrink:0;}
+.hwave{flex:1; display:flex; align-items:center; gap:2.5px; height:52px;}
+.hwave i{flex:1; border-radius:2.5px; background:var(--surface-3); transition:background .2s; min-width:3px;}
+.hwave i.on{background:linear-gradient(180deg,var(--primary),var(--accent));}
+.h-time{display:flex; justify-content:space-between; font-size:12px; color:var(--muted); margin-top:8px; font-variant-numeric:tabular-nums;}
+.metachips{display:flex; flex-wrap:wrap; gap:7px; margin-top:14px;}
+.mchip{font-size:11.5px; color:var(--muted); background:var(--surface-2); border:1px solid var(--border); border-radius:999px; padding:4px 11px;}
+.editrow{display:flex; gap:8px; margin-top:14px;}
+.editrow input,.noteedit{width:100%; border:1px solid var(--border); background:var(--surface); color:var(--text); border-radius:10px; padding:9px 12px; font-size:13.5px; font-family:var(--font);}
+.noteedit{margin-top:8px; resize:vertical; min-height:56px;}
+.transhead{display:flex; align-items:center; justify-content:space-between; margin:20px 0 10px;}
+.transhead h3{font-size:14px;}
+.transhead .ops{display:flex; gap:6px;}
+.seg{display:block; width:100%; text-align:left; border:none; background:transparent; color:var(--text);
+  padding:9px 10px; border-radius:10px; font-size:13.5px; line-height:1.65; cursor:pointer; border-left:3px solid transparent;}
+.seg:hover{background:var(--surface);}
+.seg.cur{background:var(--primary-weak); border-left-color:var(--primary);}
+.seg .ts{color:var(--primary); font-variant-numeric:tabular-nums; font-size:12px; margin-right:8px;}
+.seg .spk{color:var(--accent); font-size:12px; margin-right:6px; font-weight:600;}
+
+/* ===== 设置 ===== */
+.setgrid{max-width:640px;}
+.scard{background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-card); padding:18px; margin-bottom:14px; box-shadow:var(--shadow);}
+.scard h3{font-size:14.5px; margin-bottom:4px;}
+.scard .hint{font-size:12px; color:var(--muted); margin-bottom:14px;}
+.srow{display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 0; border-top:1px solid var(--border);}
+.srow:first-of-type{border-top:none;}
+.srow label{font-size:13.5px;}
+.srow small{display:block; color:var(--muted); font-size:11.5px;}
+select,input[type=number],input[type=text],input[type=password]{border:1px solid var(--border); background:var(--surface-2); color:var(--text); border-radius:10px; padding:8px 12px; font-size:13.5px; font-family:var(--font);}
+select{min-height:38px;}
+.toggle{position:relative; width:46px; height:27px; border-radius:999px; border:none; background:var(--surface-3); transition:background .2s; flex-shrink:0;}
+.toggle::after{content:""; position:absolute; top:3px; left:3px; width:21px; height:21px; border-radius:50%; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.3); transition:transform .2s;}
+.toggle.on{background:var(--accent);}
+.toggle.on::after{transform:translateX(19px);}
+.range{display:flex; align-items:center; gap:8px; font-size:13px; color:var(--muted);}
+.range input{width:70px;}
+.primarybtn{background:var(--primary); color:var(--on-primary); border:none; border-radius:12px; padding:11px 22px; font-size:14px; font-weight:600; min-height:44px;}
+.ghostbtn{background:var(--surface); color:var(--text); border:1px solid var(--border); border-radius:12px; padding:11px 18px; font-size:14px; min-height:44px;}
+
+/* ===== 上传 ===== */
+.drop{border:2px dashed color-mix(in srgb,var(--primary) 45%, var(--border)); border-radius:var(--radius-card);
+  background:var(--surface); padding:40px 20px; text-align:center; transition:background .15s;}
+.drop.drag{background:var(--primary-weak);}
+.drop .big{font-size:15px; font-weight:600; margin-top:10px;}
+.drop .sub{font-size:12.5px; color:var(--muted); margin-top:6px; line-height:1.7;}
+.upitem{display:flex; align-items:center; gap:12px; background:var(--surface); border:1px solid var(--border);
+  border-radius:14px; padding:13px 16px; margin-top:10px; box-shadow:var(--shadow);}
+.upitem .uinfo{flex:1; min-width:0;}
+.upitem .uname{font-size:13.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+.ubar{height:6px; border-radius:3px; background:var(--surface-3); margin-top:8px; overflow:hidden;}
+.ubar i{display:block; height:100%; width:0; border-radius:3px; background:linear-gradient(90deg,var(--primary),var(--accent)); transition:width .3s;}
+.ulabel{font-size:11.5px; color:var(--muted); margin-top:5px;}
+.ulabel.ok{color:var(--accent); font-weight:600;}
+
+/* ===== 移动端 ===== */
+.tabbar{display:none;}
+@media (max-width:760px){
+  .main{padding:16px 14px 150px;}
+  .brand small,.stat{display:none;}
+  .topbar{padding:10px 12px; gap:8px;}
+  .search{max-width:none;}
+  .card{padding:12px; gap:10px;}
+  .wave{width:58px; height:44px;}
+  .c-actions{display:none;} /* 移动端操作收进卡片点击/长按，降低误触 */
+  .player{bottom:86px;}
+  .tabbar{display:flex; position:fixed; left:50%; bottom:14px; transform:translateX(-50%); z-index:46;
+    width:min(420px, calc(100% - 28px)); background:color-mix(in srgb, var(--surface) 94%, transparent);
+    backdrop-filter:blur(14px); border:1px solid var(--border); border-radius:20px; box-shadow:var(--shadow-lg); padding:8px;}
+  .tab{flex:1; display:flex; flex-direction:column; align-items:center; gap:3px; border:none; background:transparent;
+    color:var(--muted); font-size:10.5px; padding:7px 0; border-radius:14px; min-height:52px;}
+  .tab .ic{font-size:19px; line-height:1;}
+  .tab.on{color:var(--primary); background:var(--primary-weak);}
+}
+</style>
+</head>
+<body>
+
+<!-- 设计稿工具栏（仅原型演示用） -->
+<div class="specbar">
+  <b>VoiceVault 全新界面设计原型</b>
+  <span class="tag">拖拽窗口宽度 → 响应式（≤760px 出现底部导航）</span>
+  <span class="sp"></span>
+  <button class="specbtn on" data-view="library">录音库</button>
+  <button class="specbtn" data-view="upload">上传</button>
+  <button class="specbtn" data-view="settings">设置</button>
+  <button class="specbtn" id="themeBtn">🌙 深色</button>
+</div>
+
+<!-- 产品顶栏 -->
+<header class="topbar">
+  <div class="brand">
+    <div class="logo"><svg viewBox="0 0 24 24"><path d="M4 12v0M8 8v8M12 5v14M16 8v8M20 12v0"/></svg></div>
+    <div><h1>录音保险箱</h1><small>VoiceVault · 私有 NAS</small></div>
+  </div>
+  <div class="search">
+    <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+    <input id="searchBox" type="search" placeholder="搜标题、备注，或录音里说的词…" />
+  </div>
+  <div class="stat"><b>128 条</b>已备份 · 9.4 GB</div>
+</header>
+
+<!-- ===== 视图：录音库 ===== -->
+<main class="main" id="view-library"></main>
+
+<!-- ===== 视图：上传 ===== -->
+<main class="main" id="view-upload" style="display:none; max-width:640px;">
+  <div class="drop" id="dropZone">
+    <div style="font-size:34px;">⬆️</div>
+    <div class="big">拖拽音频到这里，或点击选择</div>
+    <div class="sub">支持多选 · 4MB 分片自动上传<br/>断网 / 刷新后自动<b>从断点续传</b>，无需重传整个文件</div>
+  </div>
+  <div id="upQueue" style="margin-top:8px;"></div>
+</main>
+
+<!-- ===== 视图：设置 ===== -->
+<main class="main setgrid" id="view-settings" style="display:none;">
+  <div class="scard">
+    <h3>🎙 本地转写</h3>
+    <div class="hint">文字全程在 NAS 本地生成，不经过任何云端</div>
+    <div class="srow"><label>启用语音转文字</label><button class="toggle on" data-toggle aria-label="启用语音转文字"></button></div>
+    <div class="srow"><label>转写时机<small>闲时模式：白天只备份，夜里自动转写</small></label>
+      <select><option>关闭（仅手动）</option><option>实时转写</option><option selected>闲时转写</option></select></div>
+    <div class="srow"><label>闲时窗口<small>服务器本地时区，可跨午夜</small></label>
+      <span class="range">22:00 → 次日 07:00</span></div>
+    <div class="srow"><label>识别模型<small>4GB 内存推荐 small</small></label>
+      <select><option>tiny（最快）</option><option>base</option><option selected>small（推荐）</option><option>medium</option></select></div>
+    <div class="srow"><label>说话人分段</label><button class="toggle" data-toggle aria-label="说话人分段"></button></div>
+  </div>
+  <div class="scard">
+    <h3>🗄 保留策略</h3>
+    <div class="hint">超出后自动从最旧的录音开始清理，两项都为 0 表示永久保留</div>
+    <div class="srow"><label>保留天数</label><span class="range"><input type="number" value="365" min="0"/> 天</span></div>
+    <div class="srow"><label>容量上限</label><span class="range"><input type="number" value="50" min="0"/> GB</span></div>
+  </div>
+  <div class="scard">
+    <h3>🔗 连接</h3>
+    <div class="srow"><label>服务器地址</label><input type="text" value="http://192.168.24.37:8080" style="max-width:230px;"/></div>
+    <div class="srow"><label>访问令牌</label><input type="password" value="abcd1234" style="max-width:230px;"/></div>
+    <div style="display:flex; gap:10px; margin-top:14px;">
+      <button class="ghostbtn">测试连接</button>
+      <button class="primarybtn">保存设置</button>
+    </div>
+  </div>
+</main>
+
+<!-- 迷你播放条 -->
+<div class="player" id="player">
+  <button class="pbtn" id="pPlay">▶</button>
+  <div class="p-meta">
+    <div class="p-title" id="pTitle">未在播放</div>
+    <div class="pwave" id="pWave"></div>
+  </div>
+  <div class="p-time" id="pTime">00:00 / 00:00</div>
+</div>
+
+<!-- 移动端底部导航 -->
+<nav class="tabbar" aria-label="主导航">
+  <button class="tab on" data-view="library"><span class="ic">🗂</span>录音库</button>
+  <button class="tab" data-view="upload"><span class="ic">⬆️</span>上传</button>
+  <button class="tab" data-view="settings"><span class="ic">⚙️</span>设置</button>
+</nav>
+
+<!-- 详情抽屉 -->
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" aria-label="录音详情">
+  <div class="d-head">
+    <h2 id="dTitle">—</h2>
+    <button class="d-close" id="dClose">✕</button>
+  </div>
+  <div class="d-body">
+    <div class="hero">
+      <div class="row">
+        <button class="bigpbtn" id="dPlay">▶</button>
+        <div class="hwave" id="dWave"></div>
+      </div>
+      <div class="h-time"><span id="dCur">00:00</span><span id="dDur">00:00</span></div>
+      <div class="metachips" id="dChips"></div>
+      <div class="editrow"><input id="dTitleEdit" placeholder="标题（可搜索）"/></div>
+      <textarea class="noteedit" id="dNote" placeholder="备注：参会人、主题…（参与搜索）"></textarea>
+    </div>
+    <div class="transhead">
+      <h3>文字稿</h3>
+      <div class="ops">
+        <button class="chip" onclick="alert('导出 TXT（带时间戳）')">TXT</button>
+        <button class="chip" onclick="alert('导出 SRT 字幕')">SRT</button>
+        <button class="chip" onclick="alert('复制全文')">复制</button>
+      </div>
+    </div>
+    <div id="dSegs"></div>
+  </div>
+</aside>
+
+<script>
+/* ============ 模拟数据 ============ */
+const DATA = [
+  {day:"今天", items:[
+    {id:1, title:"客户评审会 · 方案讨论", dur:42*60+18, time:"14:32", size:"38.2 MB", dev:"小米 14", st:"done",  lang:"中文"},
+    {id:2, title:"灵感速记 · 新功能点子", dur:3*60+12,  time:"09:05", size:"2.9 MB",  dev:"小米 14", st:"idle",  lang:"—"},
+  ]},
+  {day:"昨天", items:[
+    {id:3, title:"产品周会 · 迭代排期",   dur:58*60+47, time:"16:20", size:"52.8 MB", dev:"小米 14", st:"pending", lang:"中文"},
+    {id:4, title:"读书笔记 · 认知觉醒",   dur:12*60+5,  time:"08:11", size:"11.0 MB", dev:"小米 14", st:"done",  lang:"中文"},
+  ]},
+  {day:"10 月 18 日", items:[
+    {id:5, title:"通话录音 · 未知号码",   dur:5*60+40,  time:"19:44", size:"5.1 MB",  dev:"小米 14", st:"error", lang:"—"},
+    {id:6, title:"旅行备忘 · 行李清单",   dur:1*60+32,  time:"12:03", size:"1.4 MB",  dev:"小米 14", st:"done",  lang:"中文"},
+  ]},
+];
+const SEG = {1:[["00:00","大家好，今天我们把方案的三个备选过一遍。","我"],["00:12","第二个方案预算偏高，建议砍掉两块。","张三"],["00:31","同意，先做减法再谈增量。","李四"],["00:52","那按这个口径，我下午出修订稿。","我"]],4:[["00:00","复利的关键不在强度，而在不中断。",null]]};
+const ST = {done:["done","已转写"],pending:["pending","转写中"],idle:["idle","待闲时"],error:["error","转写失败"]};
+const fmt = s => `${String(Math.floor(s/60)).padStart(2,"0")}:${String(Math.floor(s%60)).padStart(2,"0")}`;
+const waveSeed = id => Array.from({length:26}, (_,i)=> 8+Math.abs(Math.sin(id*7.3+i*1.7))*30);
+
+/* ============ 渲染：录音库 ============ */
+function renderLibrary(){
+  const root = document.getElementById("view-library");
+  root.innerHTML = "";
+  for(const g of DATA){
+    const h = document.createElement("div"); h.className="dayhead";
+    const total = g.items.reduce((a,b)=>a+b.dur,0);
+    h.innerHTML = `<b>${g.day}</b> · ${g.items.length} 条 · ${fmt(total)}`;
+    root.appendChild(h);
+    for(const it of g.items){
+      const c = document.createElement("div"); c.className="card"; c.tabIndex=0; c.dataset.id=it.id;
+      const [cls,label] = ST[it.st];
+      c.innerHTML = `
+        <div class="wave">${waveSeed(it.id).map(h=>`<i style="height:${h.toFixed(0)}px"></i>`).join("")}</div>
+        <div class="c-info">
+          <div class="c-title">${it.title}</div>
+          <div class="c-sub"><span class="dot" style="background:var(--${cls==="done"?"accent":cls==="pending"?"amber":cls==="idle"?"primary":"danger"})"></span>
+          ${it.time} · ${it.size} · ${it.dev}</div>
+        </div>
+        <span class="badge ${cls}">${label}</span>
+        <span class="dur">${fmt(it.dur)}</span>
+        <div class="c-actions"><button class="chip" aria-label="播放">▶</button></div>`;
+      c.addEventListener("click", e=>{ e.target.closest(".chip") ? play(it, c) : openDetail(it, c); });
+      c.addEventListener("keydown", e=>{ if(e.key==="Enter") openDetail(it, c); });
+      root.appendChild(c);
+    }
+  }
+}
+
+/* ============ 播放器（模拟） ============ */
+let cur=null, playing=false, t=0, timer=null;
+const pWave=document.getElementById("pWave");
+pWave.innerHTML = waveSeed(0).map(()=>"<i></i>").join("");
+function play(it, card){
+  if(cur) document.querySelectorAll(".card.playing").forEach(x=>x.classList.remove("playing"));
+  cur=it; t=0; playing=true;
+  if(card) card.classList.add("playing");
+  document.getElementById("player").scrollIntoView&&null;
+  document.getElementById("pTitle").textContent=it.title;
+  document.getElementById("pPlay").textContent="⏸";
+  const seed=waveSeed(it.id);
+  pWave.innerHTML = seed.map(()=>"<i></i>").join("");
+  if(!timer) timer=setInterval(tick, 400);
+}
+function tick(){
+  if(!playing||!cur) return;
+  t=Math.min(t+1.2, cur.dur);
+  const ratio=t/cur.dur, bars=pWave.children.length;
+  [...pWave.children].forEach((b,i)=> b.classList.toggle("on", i/bars < ratio));
+  document.getElementById("pTime").textContent = `${fmt(t)} / ${fmt(cur.dur)}`;
+  if(t>=cur.dur){ playing=false; document.getElementById("pPlay").textContent="▶"; }
+}
+document.getElementById("pPlay").onclick = ()=>{ if(!cur) return; playing=!playing;
+  document.getElementById("pPlay").textContent = playing?"⏸":"▶"; };
+
+/* ============ 详情抽屉 ============ */
+const drawer=document.getElementById("drawer"), scrim=document.getElementById("scrim");
+function openDetail(it){
+  document.getElementById("dTitle").textContent=it.title;
+  document.getElementById("dTitleEdit").value=it.title;
+  document.getElementById("dNote").value = it.st==="done" ? "参会 3 人 · 预算评审" : "";
+  document.getElementById("dDur").textContent=fmt(it.dur);
+  document.getElementById("dCur").textContent="00:00";
+  document.getElementById("dPlay").onclick=()=>play(it);
+  document.getElementById("dChips").innerHTML=
+    `<span class="mchip">⏱ ${fmt(it.dur)}</span><span class="mchip">📦 ${it.size}</span><span class="mchip">📱 ${it.dev}</span><span class="mchip">🌐 ${it.lang}</span>`;
+  const segs=SEG[it.id];
+  const box=document.getElementById("dSegs");
+  box.innerHTML = segs ? segs.map(([ts,txt,spk])=>
+    `<button class="seg"><span class="ts">${ts}</span>${spk?`<span class="spk">[${spk}]</span>`:""}${txt}</button>`).join("")
+    : `<div style="color:var(--muted); font-size:13px; padding:14px 4px;">该录音尚未转写 · 开启「闲时转写」后夜间自动生成文字稿</div>`;
+  drawer.classList.add("open"); scrim.classList.add("open");
+}
+function closeDetail(){ drawer.classList.remove("open"); scrim.classList.remove("open"); }
+document.getElementById("dClose").onclick=closeDetail;
+scrim.onclick=closeDetail;
+document.addEventListener("keydown", e=>{ if(e.key==="Escape") closeDetail(); });
+
+/* ============ 视图 / 主题 / 移动 Tab ============ */
+function switchView(v){
+  ["library","upload","settings"].forEach(k=>{
+    document.getElementById("view-"+k).style.display = k===v?"":"none";
+  });
+  document.querySelectorAll(".specbtn[data-view],.tab[data-view]").forEach(b=>b.classList.toggle("on", b.dataset.view===v));
+}
+document.querySelectorAll("[data-view]").forEach(b=> b.addEventListener("click", ()=>switchView(b.dataset.view)));
+document.getElementById("themeBtn").onclick = e=>{
+  const dark = document.documentElement.dataset.theme==="dark";
+  document.documentElement.dataset.theme = dark?"light":"dark";
+  e.target.textContent = dark?"🌙 深色":"☀️ 浅色";
+};
+
+/* 上传队列模拟（含断点续传演示） */
+const demoUps=[
+  {name:"季度复盘会.m4a", size:"61.4 MB", pct:0, label:"上传中 0%"},
+  {name:"访谈录音_张工.m4a", size:"182.7 MB", pct:37, label:"断点续传 37%（已跳过已传分片）"},
+];
+function renderUps(){
+  const q=document.getElementById("upQueue");
+  q.innerHTML = demoUps.map((u,i)=>`
+    <div class="upitem"><div style="font-size:22px">🎧</div>
+    <div class="uinfo"><div class="uname">${u.name}</div>
+    <div class="ubar"><i id="ub${i}" style="width:${u.pct}%"></i></div>
+    <div class="ulabel" id="ul${i}">${u.label} · ${u.size}</div></div></div>`).join("")
+    + `<div class="upitem" style="opacity:.75"><div style="font-size:22px">✅</div>
+    <div class="uinfo"><div class="uname">会议速记.m4a</div><div class="ulabel ok">已上传（3 分片 · SHA 校验通过）</div></div></div>`;
+}
+let upTimer=null;
+function startUps(){
+  renderUps();
+  upTimer=setInterval(()=>{
+    let alive=false;
+    demoUps.forEach((u,i)=>{
+      if(u.pct<100){ u.pct=Math.min(100,u.pct+2); alive=true;
+        const b=document.getElementById("ub"+i), l=document.getElementById("ul"+i);
+        if(b) b.style.width=u.pct+"%";
+        if(l) l.textContent=(u.pct<100?`${u.pct<37&&i===1?"断点续传 ":"上传中 "}${u.pct}%`:"✓ 已上传")+" · "+u.size;
+      }
+    });
+    if(!alive){ clearInterval(upTimer); upTimer=null; }
+  },120);
+}
+new MutationObserver(()=>{ if(document.getElementById("view-upload").style.display!=="none"&&!upTimer) startUps(); })
+  .observe(document.getElementById("view-upload"),{attributes:true,attributeFilter:["style"]});
+
+renderLibrary();
+</script>
+</body>
+</html>
