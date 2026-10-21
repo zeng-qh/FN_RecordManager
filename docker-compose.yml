@@ -2,6 +2,11 @@
 # 用法：
 #   echo "VAULT_TOKEN=你的强令牌" > .env
 #   docker compose up -d
+#
+# ┌ 内存档位速查 ─────────────────────────────────────────────
+# │ 2GB 设备：保持下方默认（tiny 模型 + mem_limit 896m/1024m）
+# │ 4GB 设备：按注释放宽——服务端 1536m、边车 2048m、模型改 small
+# └───────────────────────────────────────────────────────────
 services:
   voicvault:
     # 本地构建（含 arm64）或拉取已发布的 GHCR 镜像
@@ -19,23 +24,29 @@ services:
       - VAULT_DATADIR=/data
       - VAULT_PORT=8080
       - VAULT_BIND=0.0.0.0
-      # 树莓派 2GB 默认用 tiny 模型（ASR 开启时）；x86 可改 small / medium
+      # 转写模型：2GB 用 tiny；4GB 推荐改 small（中文准确率明显更好）
       - VAULT_ASR__MODEL=${VAULT_ASR_MODEL:-tiny}
       # 转写时机：Off（关闭，仅手动）/ Realtime（上传即转）/ Idle（闲时转写）。
       # 闲时模式配合下面两个小时变量，把转写压在空闲时段，降低白天 NAS 负载。
       - VAULT_ASR__MODE=${VAULT_ASR_MODE:-Off}
       - VAULT_ASR__IDLESTARTHOUR=${VAULT_ASR_IDLESTARTHOUR:-22}
       - VAULT_ASR__IDLEENDHOUR=${VAULT_ASR_IDLEENDHOUR:-7}
-    # 内存硬上限：2GB Pi 上留足系统与其他服务，避免 OOM。
-    # 与镜像内 DOTNET_GCHeapHardLimitPercent=70 配合，GC 堆上限约 600MB。
+    # 内存硬上限：默认为 2GB 小设备保守值。
+    # 4GB 树莓派建议改 1536m（服务端常驻仅 80-150MB，上限只是防失控护栏）。
     mem_limit: 896m
     volumes:
       - voicvault-data:/data
     restart: unless-stopped
+    # 日志轮转：防止长期运行写满 SD 卡（镜像内自带 HEALTHCHECK 探活）
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # 可选：本地语音转写边车。默认不随 `docker compose up` 启动（省内存），
   # 需要时：docker compose --profile asr up -d
-  # 注意：2GB 树莓派建议保持 tiny 并限制内存/CPU，否则转写时易 OOM。
+  # 注意：2GB 树莓派必须保持 tiny；4GB 可改 small 并放宽下方内存/CPU。
   asr:
     profiles: ["asr"]
     image: ghcr.io/zeng-qh/voicvault-asr:latest
@@ -45,11 +56,21 @@ services:
     environment:
       - ASR_DEVICE=cpu
       - ASR_COMPUTE=int8
+      # 推理线程数：保守 3（给系统留核）；4GB 四核可放开到 4
+      - CT2_NUM_THREADS=3
+      - OMP_NUM_THREADS=3
+      - MKL_NUM_THREADS=3
     volumes:
       - ./asr-models:/root/.cache  # 缓存 Whisper 模型
+    # 2GB 保守值 1024m + cpus 1.5；4GB 跑 small 建议 2048m + cpus 2.5
     mem_limit: 1024m
     cpus: "1.5"
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   voicvault-data:

@@ -8,6 +8,12 @@ namespace VoiceVault.Server.Services;
 /// </summary>
 public class StorageService
 {
+    /// <summary>允许落盘的音频扩展名白名单（防止把服务端当通用网盘滥用）。</summary>
+    private static readonly HashSet<string> AudioExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".m4a", ".mp3", ".wav", ".amr", ".aac", ".ogg", ".oga", ".flac", ".opus", ".webm", ".3gp",
+    };
+
     private readonly string _dataDir;
     private readonly string _recordingsDir;
     private readonly string _tmpDir;
@@ -42,6 +48,11 @@ public class StorageService
         var fileName = Sanitize(Path.GetFileName(relPath));
         if (!fileName.Contains('.'))
             fileName += ".m4a";
+
+        // 类型白名单：仅接受常见音频格式（普通上传与分片上传共用此校验）
+        var audioExt = Path.GetExtension(fileName);
+        if (!AudioExtensions.Contains(audioExt))
+            throw new InvalidDataException($"unsupported audio type: {audioExt}");
 
         var tmpPath = Path.Combine(_tmpDir, Guid.NewGuid().ToString("N") + ".tmp");
 
