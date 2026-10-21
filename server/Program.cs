@@ -15,11 +15,12 @@ var cfg = new VaultConfig();
 builder.Configuration.Bind(cfg);
 cfg.DataDir = Path.GetFullPath(cfg.DataDir);
 
-// 网页端设置持久化：settings.json 存在时覆盖 ASR 配置（网页端保存 > 部署默认值）
+// 网页端设置持久化：settings.json 存在时覆盖 ASR/保留策略配置（网页端保存 > 部署默认值）
 var settingsStore = new SettingsStore(cfg.DataDir);
-if (settingsStore.Load() is { } savedAsr)
+if (settingsStore.Load() is { } saved)
 {
-    cfg.Asr = savedAsr;
+    cfg.Asr = saved.Asr;
+    cfg.Retention = saved.Retention;
 }
 
 builder.WebHost.UseUrls($"http://{cfg.Bind}:{cfg.Port}");
@@ -37,6 +38,8 @@ builder.Services.AddSingleton<IdleScheduler>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<IdleScheduler>());
 builder.Services.AddSingleton(sp =>
     new ChunkedUploadStore(cfg.DataDir, sp.GetRequiredService<ILogger<ChunkedUploadStore>>()));
+builder.Services.AddSingleton<RetentionCleanup>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<RetentionCleanup>());
 builder.Services.AddLogging();
 
 // 优雅关闭：给进行中的转写足够时间收尾（默认仅 5s 过短，会被强杀）
@@ -59,6 +62,7 @@ var asr = app.Services.GetRequiredService<AsrClient>();
 var queue = app.Services.GetRequiredService<TranscriptionQueue>();
 var idle = app.Services.GetRequiredService<IdleScheduler>();
 var chunks = app.Services.GetRequiredService<ChunkedUploadStore>();
+var retention = app.Services.GetRequiredService<RetentionCleanup>();
 var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("VoiceVault");
 
 // 优雅关闭日志：便于确认容器 stop 时资源已正确释放
@@ -276,8 +280,8 @@ api.MapPost("/recordings/{id:long}/transcribe", (long id) =>
     var rec = db.GetById(id);
     if (rec is null) return Results.NotFound(new { error = "not found" });
 
-    // 手动触发总是立即执行（不受闲时窗口限制），并即时反馈状态。
-    db.UpdateTranscript(id, "", "pending", null);
+    // 手动触发总是立即执行（不受闲时窗口限制），并重置重试计数、即时反馈状态。
+    db.UpdateTranscript(id, "", "pending", null, attemptsDelta: -1_000_000);
     queue.Enqueue(id);
     return Results.Accepted(null, new { status = "pending" });
 });
@@ -291,11 +295,43 @@ api.MapPost("/transcribe/pending", () =>
     var ids = db.GetTranscribableIds();
     foreach (var id in ids)
     {
-        db.UpdateTranscript(id, "", "pending", null);
+        db.UpdateTranscript(id, "", "pending", null, attemptsDelta: -1_000_000);
         queue.Enqueue(id);
     }
     logger.LogInformation("Bulk transcribe queued: {Count} recordings", ids.Count);
     return Results.Accepted(null, new { queued = ids.Count });
+});
+
+// 更新标题 / 备注（传 null 不修改，空字符串清空；备注参与关键词搜索）
+api.MapPatch("/recordings/{id:long}", (long id, UpdateMetaRequest req) =>
+{
+    var rec = db.GetById(id);
+    if (rec is null) return Results.NotFound(new { error = "not found" });
+    db.UpdateMeta(id, req.Title, req.Note);
+    return Results.Ok(db.GetById(id));
+});
+
+// 导出文字稿：format=txt（带时间戳纯文本）| srt（标准字幕）
+api.MapGet("/recordings/{id:long}/transcript/export", (long id, string? format) =>
+{
+    var rec = db.GetById(id);
+    if (rec is null) return Results.NotFound(new { error = "not found" });
+    if (rec.TranscriptStatus != "done" || string.IsNullOrWhiteSpace(rec.TranscriptPath)
+        || !File.Exists(rec.TranscriptPath))
+        return Results.BadRequest(new { error = "transcript not ready", status = rec.TranscriptStatus });
+
+    var json = File.ReadAllText(rec.TranscriptPath);
+    var result = JsonSerializer.Deserialize<AsrResult>(json, jsonOptions);
+    if (result is null) return Results.Problem("transcript file corrupted");
+
+    var isSrt = string.Equals(format, "srt", StringComparison.OrdinalIgnoreCase);
+    var text = isSrt ? BuildSrt(result) : BuildPlainText(result);
+    var ext = isSrt ? "srt" : "txt";
+    var baseName = Path.GetFileNameWithoutExtension(
+        string.IsNullOrWhiteSpace(rec.Title) ? rec.FileName : rec.Title);
+    return Results.File(
+        Encoding.UTF8.GetBytes(text), $"text/plain; charset=utf-8",
+        fileDownloadName: $"{SanitizeFileName(baseName)}.{ext}");
 });
 
 // 删除录音：移除元数据行，并清理落盘文件与文字稿 JSON
@@ -314,35 +350,41 @@ api.MapDelete("/recordings/{id:long}", (long id) =>
     return Results.Ok(new { deleted = id });
 });
 
-// 设置（ASR 开关等，内存级；可加持久化）
+// 设置（ASR / 转写时机 / 保留策略，持久化到 settings.json）
 api.MapGet("/settings", () => Results.Ok(new
 {
     tokenHint = cfg.Token.Length > 4 ? cfg.Token[..4] + "****" : "****",
-    asr = cfg.Asr
+    asr = cfg.Asr,
+    retention = cfg.Retention
 }));
 
-api.MapPut("/settings", (AsrConfig incoming) =>
+api.MapPut("/settings", (StoredSettings incoming) =>
 {
-    cfg.Asr.Enabled = incoming.Enabled;
-    cfg.Asr.Mode = incoming.Mode;
-    cfg.Asr.IdleStartHour = ClampHour(incoming.IdleStartHour);
-    cfg.Asr.IdleEndHour = ClampHour(incoming.IdleEndHour);
-    cfg.Asr.Endpoint = incoming.Endpoint;
-    cfg.Asr.Model = incoming.Model;
-    cfg.Asr.SpeakerDiarization = incoming.SpeakerDiarization;
+    cfg.Asr.Enabled = incoming.Asr.Enabled;
+    cfg.Asr.Mode = incoming.Asr.Mode;
+    cfg.Asr.IdleStartHour = ClampHour(incoming.Asr.IdleStartHour);
+    cfg.Asr.IdleEndHour = ClampHour(incoming.Asr.IdleEndHour);
+    cfg.Asr.Endpoint = incoming.Asr.Endpoint;
+    cfg.Asr.Model = incoming.Asr.Model;
+    cfg.Asr.SpeakerDiarization = incoming.Asr.SpeakerDiarization;
+
+    cfg.Retention.Days = Math.Clamp(incoming.Retention.Days, 0, 36500);
+    cfg.Retention.MaxBytes = Math.Max(0, incoming.Retention.MaxBytes);
 
     // 持久化到 settings.json：重启容器配置不丢
-    try { settingsStore.Save(cfg.Asr); }
+    try { settingsStore.Save(new StoredSettings { Asr = cfg.Asr, Retention = cfg.Retention }); }
     catch (Exception ex) { logger.LogWarning(ex, "Failed to persist settings"); }
 
     logger.LogInformation(
-        "Settings updated: asr={Enabled}, mode={Mode}, idle={S}-{E}",
-        cfg.Asr.Enabled, cfg.Asr.Mode, cfg.Asr.IdleStartHour, cfg.Asr.IdleEndHour);
+        "Settings updated: asr={Enabled}, mode={Mode}, idle={S}-{E}, retentionDays={D}, maxBytes={M}",
+        cfg.Asr.Enabled, cfg.Asr.Mode, cfg.Asr.IdleStartHour, cfg.Asr.IdleEndHour,
+        cfg.Retention.Days, cfg.Retention.MaxBytes);
 
-    // 保存后立即巡检一次：若当前正处闲时窗口，积压无需等满 1 分钟
+    // 保存后立即生效：闲时积压巡检 + 保留策略清理各跑一次
     idle.TriggerNow();
+    retention.TriggerNow();
 
-    return Results.Ok(new { asr = cfg.Asr });
+    return Results.Ok(new { asr = cfg.Asr, retention = cfg.Retention });
 });
 
 /// <summary>将小时裁剪到 [0,23] 合法范围。</summary>
@@ -416,6 +458,57 @@ async Task<(long Id, string Sha)> CompleteRecordingAsync(
     }
 
     return (id, actualSha);
+}
+
+/// <summary>导出 TXT：每段一行「[mm:ss] (说话人)文本」，与网页端复制格式一致。</summary>
+static string BuildPlainText(AsrResult r)
+{
+    if (r.Segments is { Count: > 0 })
+    {
+        static string Ts(double s)
+        {
+            var t = TimeSpan.FromSeconds(Math.Max(0, s));
+            return t.TotalHours >= 1
+                ? $"{(int)t.TotalHours}:{t.Minutes:D2}:{t.Seconds:D2}"
+                : $"{t.Minutes:D2}:{t.Seconds:D2}";
+        }
+        return string.Join("\n", r.Segments.Select(s =>
+        {
+            var spk = string.IsNullOrWhiteSpace(s.Speaker) ? "" : $"[{s.Speaker}] ";
+            return $"[{Ts(s.Start)}] {spk}{s.Text?.Trim() ?? ""}";
+        })) + "\n";
+    }
+    return (r.Text ?? "") + "\n";
+}
+
+/// <summary>导出 SRT：标准字幕格式（含说话人前缀），可直接拖入播放器。</summary>
+static string BuildSrt(AsrResult r)
+{
+    static string Clock(double s)
+    {
+        var t = TimeSpan.FromSeconds(Math.Max(0, s));
+        return $"{(int)t.TotalHours:D2}:{t.Minutes:D2}:{t.Seconds:D2},{t.Milliseconds:D3}";
+    }
+    var sb = new StringBuilder();
+    var segs = r.Segments ?? [];
+    for (var i = 0; i < segs.Count; i++)
+    {
+        var s = segs[i];
+        var spk = string.IsNullOrWhiteSpace(s.Speaker) ? "" : $"[{s.Speaker}] ";
+        sb.AppendLine((i + 1).ToString());
+        sb.AppendLine($"{Clock(s.Start)} --> {Clock(Math.Max(s.End, s.Start))}");
+        sb.AppendLine(spk + (s.Text?.Trim() ?? ""));
+        sb.AppendLine();
+    }
+    return sb.ToString();
+}
+
+/// <summary>导出文件名清洗：去掉路径非法字符。</summary>
+static string SanitizeFileName(string name)
+{
+    foreach (var c in Path.GetInvalidFileNameChars())
+        name = name.Replace(c, '_');
+    return string.IsNullOrWhiteSpace(name) ? "transcript" : name.Trim();
 }
 
 app.Run();

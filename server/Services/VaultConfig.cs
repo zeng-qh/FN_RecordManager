@@ -65,6 +65,18 @@ public class AsrConfig
 }
 
 /// <summary>
+/// 保留策略：按天数 / 容量上限自动清理最旧录音。两项均为 0 时不启用。
+/// </summary>
+public class RetentionConfig
+{
+    /// <summary>录音保留天数（按录音时间计），超过即删；0 = 永久保留。</summary>
+    public int Days { get; set; }
+
+    /// <summary>存储容量上限（字节），超出后从最旧录音开始删除直至达标；0 = 不限制。</summary>
+    public long MaxBytes { get; set; }
+}
+
+/// <summary>
 /// 服务端运行配置，绑定自 appsettings.json 与环境变量（VAULT_ 前缀，嵌套用 __）。
 /// 例：VAULT_TOKEN / VAULT_DATADIR / VAULT_PORT / VAULT_ASR__MODE / VAULT_ASR__IDLESTARTHOUR。
 /// </summary>
@@ -83,4 +95,6 @@ public class VaultConfig
     public string Bind { get; set; } = "0.0.0.0";
 
     public AsrConfig Asr { get; set; } = new();
+
+    public RetentionConfig Retention { get; set; } = new();
 }

@@ -63,6 +63,17 @@ function fmtSec(s) {
   return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
 }
 
+// 录音时长：超过 1 小时显示 h:mm:ss
+function fmtDuration(sec) {
+  if (sec == null || !isFinite(sec) || sec <= 0) return null;
+  const t = Math.round(sec);
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const s = t % 60;
+  const p = (n) => String(n).padStart(2, "0");
+  return h > 0 ? `${h}:${p(m)}:${p(s)}` : `${p(m)}:${p(s)}`;
+}
+
 // ---- 加载与渲染 ----
 async function loadRecordings(reset = true) {
   if (state.loading) return;
@@ -133,8 +144,10 @@ function renderItem(it) {
 
   const meta = el("div", "meta");
   meta.appendChild(el("div", "name", escapeHtml(it.title || it.fileName)));
+  const dur = fmtDuration(it.durationSec);
   meta.appendChild(
-    el("div", "sub", `${fmtClock(it.recordedAt)} · ${fmtSize(it.size)} · ${it.device}`)
+    el("div", "sub",
+      `${fmtClock(it.recordedAt)} · ${dur ? dur + " · " : ""}${fmtSize(it.size)} · ${it.device}`)
   );
 
   const badge = el("div", null, statusBadge(it.transcriptStatus));
@@ -175,6 +188,7 @@ function playRecording(it) {
 
 // ---- 详情页：左播放 / 右文字稿 ----
 let detailId = null;
+let detailRec = null; // 当前详情录音（保存标题/备注用）
 let detailPollTimer = null;
 let detailTranscriptData = null;
 
@@ -188,12 +202,19 @@ async function openDetail(id) {
     const rec = await res.json();
 
     $("#dTitle").textContent = rec.title || rec.fileName;
+    const dur = fmtDuration(rec.durationSec);
     $("#dMeta").textContent =
-      `${fmtDate(rec.recordedAt)} ${fmtClock(rec.recordedAt)} · ${fmtSize(rec.size)} · 设备 ${rec.device}`;
+      `${fmtDate(rec.recordedAt)} ${fmtClock(rec.recordedAt)}`
+      + `${dur ? " · 时长 " + dur : ""} · ${fmtSize(rec.size)} · 设备 ${rec.device}`;
     $("#dInfo").innerHTML =
       `<div>文件名：${escapeHtml(rec.fileName || "-")}</div>` +
       `<div>路径：${escapeHtml(rec.relPath || "-")}</div>` +
       `<div>大小：${fmtSize(rec.size)} · SHA-256：${escapeHtml((rec.sha256 || "").slice(0, 16))}…</div>`;
+
+    // 标题/备注编辑区回填
+    detailRec = rec;
+    $("#dEditTitle").value = rec.title || "";
+    $("#dNoteEdit").value = rec.note || "";
 
     const base = state.server.replace(/\/$/, "");
     const url = `${base}/api/recordings/${id}/file?token=${encodeURIComponent(state.token)}`;
@@ -508,6 +529,62 @@ async function deleteFromDetail() {
   }
 }
 
+// ---- 保存标题/备注（PATCH）----
+async function saveDetailMeta() {
+  if (!detailId || !detailRec) return;
+  const title = $("#dEditTitle").value.trim();
+  const note = $("#dNoteEdit").value.trim();
+  try {
+    const res = await api(`/api/recordings/${detailId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, note }),
+    });
+    if (res.ok) {
+      const rec = await res.json();
+      detailRec = rec;
+      $("#dTitle").textContent = rec.title || rec.fileName;
+      setStatus("标题/备注已保存。");
+      loadRecordings(true);
+    } else {
+      const d = await res.json().catch(() => ({}));
+      alert("保存失败：" + (d.error || res.status));
+    }
+  } catch (e) {
+    alert("保存失败：" + e.message);
+  }
+}
+
+// ---- 导出文字稿（TXT / SRT）----
+async function exportTranscript(fmt) {
+  if (!detailId) return;
+  if (!detailTranscriptData) {
+    alert("文字稿尚未生成，请先转写。");
+    return;
+  }
+  try {
+    const res = await api(`/api/recordings/${detailId}/transcript/export?format=${fmt}`);
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      alert("导出失败：" + (d.error || res.status));
+      return;
+    }
+    const blob = await res.blob();
+    const name = `${(detailRec?.title || detailRec?.fileName || "transcript").replace(/[\\/:*?"<>|]/g, "_")}.${fmt}`;
+    const url = URL.createObjectURL(blob);
+    const a = el("a");
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    setStatus(`文字稿已导出为 ${fmt.toUpperCase()}。`);
+  } catch (e) {
+    alert("导出失败：" + e.message);
+  }
+}
+
 // ---- 批量转写（设置页）----
 async function transcribeAll() {
   if (!state.asrEnabled) {
@@ -578,6 +655,9 @@ async function refreshSettingsForm() {
     $("#cfgAsrEndpoint").value = d.asr?.endpoint || "";
     $("#cfgAsrModel").value = d.asr?.model || "small";
     $("#cfgAsrDiarize").checked = !!(d.asr && d.asr.speakerDiarization);
+    $("#cfgRetDays").value = d.retention?.days ?? 0;
+    const gb = d.retention?.maxBytes ?? 0;
+    $("#cfgRetGb").value = gb > 0 ? Math.max(1, Math.round(gb / (1024 ** 3))) : 0;
     syncIdleWindowBox();
   } catch (e) {}
 }
@@ -616,25 +696,32 @@ async function saveSettings() {
   localStorage.setItem(LS_SERVER, state.server);
   localStorage.setItem(LS_TOKEN, state.token);
 
-  // 把 ASR 配置写回服务端（含转写模式与闲时窗口）
+  // 把设置写回服务端（ASR + 保留策略）
   const s = Math.max(0, Math.min(23, Number($("#cfgAsrIdleStart").value) || 0));
   const e = Math.max(0, Math.min(23, Number($("#cfgAsrIdleEnd").value) || 0));
-  const asr = {
-    enabled: $("#cfgAsrEnabled").checked,
-    mode: $("#cfgAsrMode").value,
-    idleStartHour: s,
-    idleEndHour: e,
-    endpoint: $("#cfgAsrEndpoint").value.trim(),
-    model: $("#cfgAsrModel").value,
-    speakerDiarization: $("#cfgAsrDiarize").checked,
+  const retGb = Math.max(0, Number($("#cfgRetGb").value) || 0);
+  const body = {
+    asr: {
+      enabled: $("#cfgAsrEnabled").checked,
+      mode: $("#cfgAsrMode").value,
+      idleStartHour: s,
+      idleEndHour: e,
+      endpoint: $("#cfgAsrEndpoint").value.trim(),
+      model: $("#cfgAsrModel").value,
+      speakerDiarization: $("#cfgAsrDiarize").checked,
+    },
+    retention: {
+      days: Math.max(0, Number($("#cfgRetDays").value) || 0),
+      maxBytes: Math.round(retGb * 1024 ** 3),
+    },
   };
   try {
     await api("/api/settings", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(asr),
+      body: JSON.stringify(body),
     });
-    state.asrEnabled = asr.enabled;
+    state.asrEnabled = body.asr.enabled;
   } catch (e) {}
 
   closeSettings();
@@ -669,6 +756,9 @@ $("#cfgAsrIdleStart").oninput = updateIdlePreview;
 $("#cfgAsrIdleEnd").oninput = updateIdlePreview;
 $("#dDelete").onclick = deleteFromDetail;
 $("#transcribeAllBtn").onclick = transcribeAll;
+$("#dSaveMeta").onclick = saveDetailMeta;
+$("#dExportTxt").onclick = () => exportTranscript("txt");
+$("#dExportSrt").onclick = () => exportTranscript("srt");
 
 // 详情弹层事件
 $("#dClose").onclick = closeDetail;

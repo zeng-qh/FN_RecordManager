@@ -97,6 +97,14 @@
       <label class="row">
         <input id="cfgAsrDiarize" type="checkbox" /> 说话人分段
       </label>
+      <hr />
+      <h3>保留策略</h3>
+      <div class="idle-hint">超期或超出容量上限时，自动从最旧的录音开始清理（两项都填 0 表示永久保留全部）。</div>
+      <div class="idle-range">
+        <label>保留 <input id="cfgRetDays" type="number" min="0" max="36500" step="1" value="0" /> 天</label>
+        <span class="idle-sep">·</span>
+        <label>上限 <input id="cfgRetGb" type="number" min="0" step="1" value="0" /> GB</label>
+      </div>
       <div class="modal-actions">
         <button id="transcribeAllBtn">转写全部未处理</button>
         <button id="testConn">测试连接</button>
@@ -124,6 +132,13 @@
               <audio id="dAudio" controls preload="metadata"></audio>
             </div>
           </div>
+          <div class="d-edit-card">
+            <div class="d-edit-row">
+              <input id="dEditTitle" type="text" placeholder="标题（可搜索）" />
+              <button id="dSaveMeta" title="保存标题与备注">💾</button>
+            </div>
+            <textarea id="dNoteEdit" placeholder="备注（参与关键词搜索，如：参会人、主题…）" rows="2"></textarea>
+          </div>
           <div id="dInfo" class="d-info-card"></div>
           <a id="dDownload" class="d-download" download>⬇ 下载原文件</a>
           <button id="dDelete" class="d-delete">🗑 删除录音</button>
@@ -132,6 +147,8 @@
           <div class="d-trans-head">
             <h3>文字稿</h3>
             <div class="d-trans-actions">
+              <button id="dExportTxt" title="导出带时间戳纯文本">导出TXT</button>
+              <button id="dExportSrt" title="导出标准字幕文件">导出SRT</button>
               <button id="dCopy">复制全文</button>
               <button id="dTranscribe">立即转写</button>
             </div>

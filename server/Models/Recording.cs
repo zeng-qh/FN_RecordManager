@@ -34,7 +34,7 @@ public class Recording
     /// <summary>录音时间（Unix 秒），由 mtime 推导，用于时间线分组。</summary>
     public long RecordedAt { get; set; }
 
-    /// <summary>转写状态：none / pending / done / error。</summary>
+    /// <summary>转写状态：none / idle（待闲时）/ pending / done / error。</summary>
     public string? TranscriptStatus { get; set; } = "none";
 
     /// <summary>转写结果 JSON 的路径。</summary>
@@ -42,6 +42,15 @@ public class Recording
 
     /// <summary>识别出的语言代码。</summary>
     public string? Language { get; set; }
+
+    /// <summary>录音时长（秒）；转写完成后由末段 end 提取，未转写时为空。</summary>
+    public double? DurationSec { get; set; }
+
+    /// <summary>转写已失败次数（闲时窗口内自动重试，达上限后仅可手动重试）。</summary>
+    public int TranscriptAttempts { get; set; }
+
+    /// <summary>用户备注（参与关键词搜索）。</summary>
+    public string? Note { get; set; }
 
     /// <summary>入库时间（ISO8601）。</summary>
     public DateTime CreatedAt { get; set; }

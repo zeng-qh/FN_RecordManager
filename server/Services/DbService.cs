@@ -39,6 +39,24 @@ public class DbService
             CREATE INDEX IF NOT EXISTS idx_recorded_at ON recordings(recorded_at DESC);
             """;
         cmd.ExecuteNonQuery();
+
+        // 增量列迁移（已存在时静默跳过）
+        foreach (var ddl in new[]
+        {
+            "ALTER TABLE recordings ADD COLUMN transcript_text TEXT",           // 文字稿全文（供检索）
+            "ALTER TABLE recordings ADD COLUMN duration_sec REAL",              // 录音时长（秒）
+            "ALTER TABLE recordings ADD COLUMN transcript_attempts INTEGER NOT NULL DEFAULT 0", // 转写失败重试计数
+            "ALTER TABLE recordings ADD COLUMN note TEXT",                      // 用户备注
+        })
+        {
+            try
+            {
+                using var mi = c.CreateCommand();
+                mi.CommandText = ddl;
+                mi.ExecuteNonQuery();
+            }
+            catch (SqliteException) { /* 列已存在 */ }
+        }
     }
 
     /// <summary>打开连接并应用并发/崩溃安全 PRAGMA（WAL + 同步 + 忙等待）。</summary>
@@ -103,7 +121,7 @@ public class DbService
     {
         using var c = OpenConn();
         using var cmd = c.CreateCommand();
-        cmd.CommandText = "SELECT * FROM recordings WHERE id=@id";
+        cmd.CommandText = $"SELECT {ListColumns} FROM recordings WHERE id=@id";
         cmd.Parameters.AddWithValue("@id", id);
         using var r = cmd.ExecuteReader();
         return r.Read() ? ReadRecording(r) : null;
@@ -117,7 +135,7 @@ public class DbService
 
         var where = BuildWhere(from, to, q, cmd);
         cmd.CommandText = $"""
-            SELECT * FROM recordings {where}
+            SELECT {ListColumns} FROM recordings {where}
             ORDER BY recorded_at DESC, id DESC
             LIMIT @limit OFFSET @offset
             """;
@@ -137,13 +155,29 @@ public class DbService
         return Convert.ToInt64(cmd.ExecuteScalar());
     }
 
-    /// <summary>返回所有处于「待闲时」状态（transcript_status='idle'）的录音 id，供闲时调度器批量入队。</summary>
+    /// <summary>
+    /// 列表/详情查询列。刻意不含 transcript_text（大字段）：
+    /// 全文仅供 LIKE 检索，正文始终走 /transcript 端点，避免列表接口膨胀。
+    /// </summary>
+    private const string ListColumns =
+        "id, device, rel_path, file_name, stored_path, size, mtime, sha256, title, recorded_at, " +
+        "transcript_status, transcript_path, language, duration_sec, transcript_attempts, note, created_at";
+
+    /// <summary>
+    /// 闲时调度器取数：待闲时（idle）的录音 + 转写失败未达重试上限
+    /// （error 且 attempts &lt; 3，即初失败后最多自动重试 2 次）的录音。
+    /// </summary>
     public List<long> GetIdlePendingIds()
     {
         var ids = new List<long>();
         using var c = OpenConn();
         using var cmd = c.CreateCommand();
-        cmd.CommandText = "SELECT id FROM recordings WHERE transcript_status='idle' ORDER BY id";
+        cmd.CommandText = """
+            SELECT id FROM recordings
+            WHERE transcript_status = 'idle'
+               OR (transcript_status = 'error' AND transcript_attempts < 3)
+            ORDER BY id
+            """;
         using var r = cmd.ExecuteReader();
         while (r.Read()) ids.Add(r.GetInt64(0));
         return ids;
@@ -178,19 +212,83 @@ public class DbService
         return rec;
     }
 
-    public void UpdateTranscript(long id, string path, string status, string? lang)
+    public void UpdateTranscript(long id, string path, string status, string? lang, int attemptsDelta = 0)
     {
         using var c = OpenConn();
         using var cmd = c.CreateCommand();
         cmd.CommandText = """
-            UPDATE recordings SET transcript_status=@ts, transcript_path=@tp, language=@lang
+            UPDATE recordings
+            SET transcript_status=@ts, transcript_path=@tp, language=@lang,
+                transcript_attempts = MAX(0, transcript_attempts + @delta)
             WHERE id=@id
             """;
         cmd.Parameters.AddWithValue("@ts", status);
         cmd.Parameters.AddWithValue("@tp", path);
         cmd.Parameters.AddWithValue("@lang", (object?)lang ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@delta", attemptsDelta);
         cmd.Parameters.AddWithValue("@id", id);
         cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>转写成功后落库全文（供检索）与时长（秒）。</summary>
+    public void SaveTranscriptResult(long id, string plainText, double durationSec)
+    {
+        using var c = OpenConn();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = """
+            UPDATE recordings SET transcript_text=@t, duration_sec=@d WHERE id=@id
+            """;
+        cmd.Parameters.AddWithValue("@t", plainText);
+        cmd.Parameters.AddWithValue("@d", durationSec);
+        cmd.Parameters.AddWithValue("@id", id);
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>更新标题/备注：传 null 表示不修改，空字符串表示清空。</summary>
+    public void UpdateMeta(long id, string? title, string? note)
+    {
+        using var c = OpenConn();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = """
+            UPDATE recordings SET title=COALESCE(@title, title), note=COALESCE(@note, note)
+            WHERE id=@id
+            """;
+        cmd.Parameters.AddWithValue("@title", (object?)title ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@note", (object?)note ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@id", id);
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>保留策略：早于 cutoff（Unix 秒）的录音 id，由旧到新。</summary>
+    public List<long> GetIdsOlderThan(long cutoff)
+    {
+        var ids = new List<long>();
+        using var c = OpenConn();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = "SELECT id FROM recordings WHERE recorded_at < @c ORDER BY recorded_at ASC, id ASC";
+        cmd.Parameters.AddWithValue("@c", cutoff);
+        using var r = cmd.ExecuteReader();
+        while (r.Read()) ids.Add(r.GetInt64(0));
+        return ids;
+    }
+
+    /// <summary>全部录音占用字节数（保留策略容量判断用）。</summary>
+    public long TotalBytes()
+    {
+        using var c = OpenConn();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = "SELECT COALESCE(SUM(size), 0) FROM recordings";
+        return Convert.ToInt64(cmd.ExecuteScalar());
+    }
+
+    /// <summary>最旧一条录音的 id（容量策略逐条删除用）；空库返回 null。</summary>
+    public long? GetOldestId()
+    {
+        using var c = OpenConn();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = "SELECT id FROM recordings ORDER BY recorded_at ASC, id ASC LIMIT 1";
+        var v = cmd.ExecuteScalar();
+        return v is null ? null : Convert.ToInt64(v);
     }
 
     private static string BuildWhere(long from, long to, string? q, SqliteCommand cmd)
@@ -208,7 +306,8 @@ public class DbService
         }
         if (!string.IsNullOrWhiteSpace(q))
         {
-            clauses.Add("(file_name LIKE @q OR title LIKE @q OR rel_path LIKE @q)");
+            // 关键词同时命中 文件名/标题/路径/备注/文字稿全文
+            clauses.Add("(file_name LIKE @q OR title LIKE @q OR rel_path LIKE @q OR note LIKE @q OR transcript_text LIKE @q)");
             cmd.Parameters.AddWithValue("@q", $"%{q}%");
         }
         return clauses.Count > 0 ? "WHERE " + string.Join(" AND ", clauses) : "";
@@ -231,6 +330,9 @@ public class DbService
             TranscriptStatus = r.IsDBNull(r.GetOrdinal("transcript_status")) ? "none" : r.GetString(r.GetOrdinal("transcript_status")),
             TranscriptPath = r.IsDBNull(r.GetOrdinal("transcript_path")) ? null : r.GetString(r.GetOrdinal("transcript_path")),
             Language = r.IsDBNull(r.GetOrdinal("language")) ? null : r.GetString(r.GetOrdinal("language")),
+            DurationSec = r.IsDBNull(r.GetOrdinal("duration_sec")) ? null : r.GetDouble(r.GetOrdinal("duration_sec")),
+            TranscriptAttempts = r.GetInt32(r.GetOrdinal("transcript_attempts")),
+            Note = r.IsDBNull(r.GetOrdinal("note")) ? null : r.GetString(r.GetOrdinal("note")),
             CreatedAt = DateTime.TryParse(r.GetString(r.GetOrdinal("created_at")), out var d) ? d : DateTime.MinValue
         };
     }

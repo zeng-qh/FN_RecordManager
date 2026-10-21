@@ -52,7 +52,8 @@ public class TranscriptionQueue : BackgroundService
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Transcribe failed id={Id}", id);
-                    _db.UpdateTranscript(id, "", "error", null);
+                    // 失败计次：闲时窗口内 attempts < 3 时会被自动重试（初失败后最多再试 2 次）
+                    _db.UpdateTranscript(id, "", "error", null, attemptsDelta: +1);
                 }
             }
         }
@@ -95,7 +96,8 @@ public class TranscriptionQueue : BackgroundService
         if (result is null)
         {
             _logger.LogWarning("ASR sidecar returned no result for id={Id}", id);
-            _db.UpdateTranscript(id, "", "error", null);
+            // 边车临时不可用属可重试错误：计次，闲时窗口内自动重试
+            _db.UpdateTranscript(id, "", "error", null, attemptsDelta: +1);
             return;
         }
 
@@ -104,8 +106,16 @@ public class TranscriptionQueue : BackgroundService
         var tPath = Path.Combine(tDir, $"{id}.json");
         await File.WriteAllTextAsync(tPath, JsonSerializer.Serialize(result, _json), ct);
 
-        _db.UpdateTranscript(id, tPath, "done", result.Language);
-        _logger.LogInformation("Transcribed id={Id} lang={Lang} segments={Seg}",
-            id, result.Language, result.Segments?.Count ?? 0);
+        // 全文与时长落库：全文供关键词检索（列 transcript_text），时长取末段 end（秒）
+        var plainText = !string.IsNullOrWhiteSpace(result.Text)
+            ? result.Text!
+            : string.Join("\n", (result.Segments ?? []).Select(s => s.Text ?? ""));
+        var durationSec = (result.Segments is { Count: > 0 }) ? result.Segments[^1].End : 0;
+        if (plainText.Length > 0 || durationSec > 0)
+            _db.SaveTranscriptResult(id, plainText, durationSec);
+
+        _db.UpdateTranscript(id, tPath, "done", result.Language, attemptsDelta: -1_000_000); // 成功清零重试计数
+        _logger.LogInformation("Transcribed id={Id} lang={Lang} segments={Seg} duration={Dur:F1}s",
+            id, result.Language, result.Segments?.Count ?? 0, durationSec);
     }
 }

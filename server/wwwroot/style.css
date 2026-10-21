@@ -272,6 +272,23 @@ main { flex: 1; padding: 20px; max-width: 900px; width: 100%; margin: 0 auto; }
 }
 .d-delete:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); }
 
+/* 标题/备注编辑 */
+.d-edit-card { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.d-edit-row { display: flex; gap: 8px; }
+.d-edit-row input {
+  flex: 1; padding: 8px 10px; border-radius: 10px;
+  border: 1px solid var(--border); background: var(--panel); color: var(--text);
+}
+.d-edit-row button {
+  padding: 0 14px; border-radius: 10px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--panel-2); color: var(--text);
+}
+.d-edit-card textarea {
+  resize: vertical; padding: 8px 10px; border-radius: 10px;
+  border: 1px solid var(--border); background: var(--panel); color: var(--text);
+  font-family: inherit; font-size: 13px;
+}
+
 .d-trans-head {
   display: flex; justify-content: space-between; align-items: center;
   margin-bottom: 10px; gap: 10px; flex-wrap: wrap;
