@@ -11,6 +11,8 @@ const state = {
   loading: false,
   asrEnabled: true, // 与服务端默认开启一致（实际值以 /api/settings 回填为准）
   q: "",
+  selectMode: false,      // 多选管理模式
+  selected: new Set(),    // 选中的录音 id
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -171,6 +173,7 @@ function statusBadge(it) {
 function renderItem(it) {
   const item = el("div", "item");
   item.dataset.id = it.id;
+  if (state.selectMode && state.selected.has(it.id)) item.classList.add("selected");
 
   const play = el("button", "play", "▶");
   play.title = "播放";
@@ -186,22 +189,96 @@ function renderItem(it) {
 
   const badge = el("div", null, statusBadge(it));
   const ops = el("div", "ops");
-  if (state.asrEnabled) {
-    const tBtn = el("button", null, "转写");
-    tBtn.onclick = () => triggerTranscribe(it.id);
-    ops.appendChild(tBtn);
+  if (state.selectMode) {
+    // 多选模式：复选框替代操作按钮，整卡点击切换选中
+    const chk = el("input", "pick");
+    chk.type = "checkbox";
+    chk.checked = state.selected.has(it.id);
+    ops.appendChild(chk);
+  } else {
+    if (state.asrEnabled) {
+      const tBtn = el("button", null, "转写");
+      tBtn.onclick = () => triggerTranscribe(it.id);
+      ops.appendChild(tBtn);
+    }
+    const vBtn = el("button", null, "文字稿");
+    vBtn.onclick = () => openDetail(it.id);
+    ops.appendChild(vBtn);
   }
-  const vBtn = el("button", null, "文字稿");
-  vBtn.onclick = () => openDetail(it.id);
-  ops.appendChild(vBtn);
 
   item.append(play, meta, badge, ops);
-  // 点击条目任意非按钮区域 → 打开详情（左播放 / 右文字稿）
+  // 点击条目：多选模式切换选中；普通模式打开详情（按钮区除外）
   item.addEventListener("click", (e) => {
-    if (e.target.closest("button")) return;
-    openDetail(it.id);
+    if (e.target.closest("button") && !state.selectMode) return;
+    if (state.selectMode) {
+      e.preventDefault();
+      toggleSelect(it.id);
+    } else {
+      openDetail(it.id);
+    }
   });
   return item;
+}
+
+// ---- 多选管理（批量删除 / 打包导出）----
+function toggleSelect(id) {
+  if (state.selected.has(id)) state.selected.delete(id);
+  else state.selected.add(id);
+  syncBatchBar();
+  document.querySelectorAll(".item").forEach((n) => {
+    n.classList.toggle("selected", state.selected.has(Number(n.dataset.id)));
+    const chk = n.querySelector("input.pick");
+    if (chk) chk.checked = state.selected.has(Number(n.dataset.id));
+  });
+}
+
+function syncBatchBar() {
+  const bar = $("#batchBar");
+  bar.hidden = !state.selectMode;
+  $("#batchCount").textContent = `已选 ${state.selected.size} 条`;
+  $("#manageBtn").classList.toggle("active", state.selectMode);
+}
+
+function setSelectMode(on) {
+  state.selectMode = on;
+  state.selected.clear();
+  syncBatchBar();
+  loadRecordings(true); // 重绘列表以切换复选框/操作按钮形态
+}
+
+async function batchDelete() {
+  const ids = [...state.selected];
+  if (!ids.length) return setStatus("请先勾选要删除的录音。");
+  if (!confirm(`确定删除选中的 ${ids.length} 条录音？文件与文字稿将一并删除，不可恢复。`)) return;
+  try {
+    const res = await api("/api/recordings/batch-delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(ids),
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const d = await res.json();
+    setStatus(`已删除 ${d.deleted} 条录音。`);
+    setSelectMode(false);
+    loadRecordings(true);
+  } catch (e) {
+    if (e.message !== "unauthorized") setStatus("批量删除失败：" + e.message);
+  }
+}
+
+function batchExport() {
+  const ids = [...state.selected];
+  if (!ids.length) return setStatus("请先勾选要导出的录音。");
+  // 浏览器直连下载（?token= 等价凭证），避免大 ZIP 占用前端内存
+  const url = `${state.server.replace(/\/$/, "")}/api/recordings/export/zip` +
+    `?ids=${ids.join(",")}&token=${encodeURIComponent(state.token)}`;
+  setStatus(`开始打包 ${ids.length} 条录音…`);
+  const a = el("a");
+  a.href = url;
+  a.download = "voicevault.zip";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 function escapeHtml(s) {
@@ -745,7 +822,26 @@ function closeSettings() {
   $("#settingsModal").hidden = true;
 }
 
+// 设置弹窗顶部：服务器状态水位（health 接口，无需敏感信息）
+async function refreshServerStatus() {
+  const box = $("#srvStatus");
+  try {
+    const res = await api("/api/health");
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const d = await res.json();
+    const gb = d.diskFreeBytes ? (d.diskFreeBytes / 1024 ** 3).toFixed(0) + " GB" : "未知";
+    box.textContent =
+      `● 服务器正常 · 磁盘剩余 ${gb} · 录音 ${d.recordings ?? "—"} 条 · 占用 ${fmtSize(d.totalBytes ?? 0)}`;
+    box.classList.add("ok");
+  } catch (e) {
+    box.textContent = "● 无法获取服务器状态（请检查地址与令牌）";
+    box.classList.remove("ok");
+  }
+}
+
 async function refreshSettingsForm() {
+  // 服务器状态水位（磁盘 / 条数 / 占用），失败静默
+  refreshServerStatus();
   // 拉取 ASR 配置回填
   try {
     const res = await api("/api/settings");
@@ -880,6 +976,21 @@ $("#dExportSrt").onclick = () => exportTranscript("srt");
 $("#dClose").onclick = closeDetail;
 $("#dCopy").onclick = copyTranscript;
 $("#dTranscribe").onclick = transcribeFromDetail;
+
+// 多选管理
+$("#manageBtn").onclick = () => setSelectMode(!state.selectMode);
+$("#batchCancel").onclick = () => setSelectMode(false);
+$("#batchDelete").onclick = batchDelete;
+$("#batchExport").onclick = batchExport;
+$("#batchAll").onclick = () => {
+  document.querySelectorAll(".item").forEach((n) => state.selected.add(Number(n.dataset.id)));
+  document.querySelectorAll(".item").forEach((n) => {
+    n.classList.add("selected");
+    const chk = n.querySelector("input.pick");
+    if (chk) chk.checked = true;
+  });
+  syncBatchBar();
+};
 $("#detailModal").addEventListener("click", (e) => {
   if (e.target.id === "detailModal") closeDetail();
 });

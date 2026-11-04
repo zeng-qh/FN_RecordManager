@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Data.Sqlite;
+using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -442,6 +443,65 @@ api.MapDelete("/recordings/{id:long}", (long id) =>
     }
     logger.LogInformation("Deleted recording id={Id} relPath={RelPath}", id, rec.RelPath);
     return Results.Ok(new { deleted = id });
+});
+
+// 批量删除：网页端多选模式一次删除多条（逐条走同一清理逻辑，幂等）
+api.MapPost("/recordings/batch-delete", (List<long> ids) =>
+{
+    var deleted = 0;
+    var notFound = new List<long>();
+    foreach (var id in ids.Distinct().Take(1000))
+    {
+        var rec = db.DeleteById(id);
+        if (rec is null) { notFound.Add(id); continue; }
+        foreach (var p in new[] { rec.StoredPath, rec.TranscriptPath })
+        {
+            if (string.IsNullOrWhiteSpace(p) || !File.Exists(p)) continue;
+            try { File.Delete(p); }
+            catch (Exception ex) { logger.LogWarning(ex, "Batch delete: failed to remove {Path}", p); }
+        }
+        deleted++;
+    }
+    logger.LogInformation("Batch deleted {Count} recordings, {Missing} not found", deleted, notFound.Count);
+    return Results.Ok(new { deleted, notFound });
+});
+
+// 批量打包导出：ids 逗号分隔，流式 ZIP 直写响应（音频已压缩，NoCompression 省时省 CPU）
+api.MapGet("/recordings/export/zip", async (HttpContext ctx, string? ids) =>
+{
+    var idList = (ids ?? "")
+        .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Select(s => long.TryParse(s, out var i) ? i : 0)
+        .Where(i => i > 0).Distinct().Take(500).ToList();
+    if (idList.Count == 0)
+        return Results.BadRequest(new { error = "ids required, e.g. ?ids=1,2,3" });
+
+    var recs = idList.Select(db.GetById)
+        .Where(r => r is not null && File.Exists(r!.StoredPath))
+        .Select(r => r!)
+        .ToList();
+    if (recs.Count == 0)
+        return Results.NotFound(new { error = "no recordings available" });
+
+    logger.LogInformation("Exporting {Count} recordings as zip", recs.Count);
+    ctx.Response.ContentType = "application/zip";
+    ctx.Response.Headers.ContentDisposition =
+        $"attachment; filename=voicevault-{DateTime.Now:yyyyMMdd-HHmmss}.zip";
+
+    // BodyWriter.AsStream：其同步写内部转 FlushAsync，绕开 Kestrel 禁同步 IO 限制
+    // （ZipArchive Dispose 写 central directory 是同步 Write，直接用 Response.Body 会抛异常）
+    // entry 名加 id 前缀：天然去重，避免同名文件在 zip 内冲突
+    await using var zip = new ZipArchive(
+        ctx.Response.BodyWriter.AsStream(leaveOpen: true), ZipArchiveMode.Create, leaveOpen: true);
+    foreach (var rec in recs)
+    {
+        var entry = zip.CreateEntry($"{rec.Id}_{rec.FileName}", CompressionLevel.NoCompression);
+        await using var es = entry.Open();
+        await using var fs = File.OpenRead(rec.StoredPath);
+        await fs.CopyToAsync(es, ctx.RequestAborted);
+    }
+    await zip.DisposeAsync(); // 显式落 central directory / EOCD 后再结束响应
+    return Results.Empty;
 });
 
 // 设置（ASR / 转写时机 / 保留策略，持久化到 settings.json）
