@@ -32,7 +32,10 @@ async function api(path, opts = {}) {
     headers: { ...authHeader(), ...(opts.headers || {}) },
   });
   if (res.status === 401) {
-    openSettings("令牌无效或为空，请重新设置");
+    // 仅当设置弹窗未打开时才引导打开：
+    // 否则 saveSettings 关闭弹窗后，refreshSettingsForm 的异步 401 回调
+    // 会把弹窗重新打开，表现为「点保存后设置弹窗不关闭」
+    if ($("#settingsModal").hidden) openSettings("令牌无效或为空，请重新设置");
     throw new Error("unauthorized");
   }
   return res;
@@ -716,13 +719,25 @@ async function saveSettings() {
     },
   };
   try {
-    await api("/api/settings", {
+    const res = await api("/api/settings", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      setStatus("设置保存失败：" + (d.error || "HTTP " + res.status));
+      return; // 保存失败：保持弹窗打开，修正后可直接重试
+    }
     state.asrEnabled = body.asr.enabled;
-  } catch (e) {}
+  } catch (err) {
+    if (err.message === "unauthorized") {
+      setStatus("令牌无效：请核对「访问令牌」与服务端 VAULT_TOKEN 一致后再保存。");
+    } else {
+      setStatus("设置保存失败：" + err.message + "（请检查服务器地址是否可达）");
+    }
+    return; // 保存失败：保持弹窗打开
+  }
 
   closeSettings();
   loadRecordings(true);
