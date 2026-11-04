@@ -152,7 +152,11 @@ main { flex: 1; padding: 20px; max-width: 900px; width: 100%; margin: 0 auto; }
   position: absolute; inset: 0; z-index: 5;
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
   background: var(--panel); border-radius: 16px;
+  animation: vv-pop 0.25s ease;
 }
+/* 关键：display:flex 的优先级会压过 [hidden] 的 UA 样式（display:none），
+   导致动画层常驻显示、看不到「出现」的过程——必须显式恢复 hidden 生效 */
+.upload-done[hidden] { display: none; }
 .done-check {
   width: 76px; height: 76px;
   filter: drop-shadow(0 4px 14px rgba(46, 160, 67, 0.35));
@@ -167,9 +171,10 @@ main { flex: 1; padding: 20px; max-width: 900px; width: 100%; margin: 0 auto; }
   stroke-dasharray: 36; stroke-dashoffset: 36;
   animation: vv-draw 0.3s ease-out 0.4s forwards;
 }
-.done-text { font-size: 14px; color: var(--text); opacity: 0; animation: vv-fade 0.3s ease 0.65s forwards; }
+.done-text { font-size: 15px; color: var(--text); opacity: 0; animation: vv-fade 0.3s ease 0.65s forwards; }
 @keyframes vv-draw { to { stroke-dashoffset: 0; } }
 @keyframes vv-fade { to { opacity: 1; } }
+@keyframes vv-pop { from { opacity: 0; transform: scale(0.92); } to { opacity: 1; transform: scale(1); } }
 
 .item .ops { display: flex; gap: 6px; flex-shrink: 0; }
 .item .ops button {

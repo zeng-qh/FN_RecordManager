@@ -253,6 +253,16 @@ api.MapPost("/upload", async (HttpContext ctx) =>
 });
 
 // ---- 分片上传（网页端断点续传；弱网/大文件中断后仅补传缺失分片）----
+
+// 秒传预校验：客户端上传前先本地算 SHA-256，命中（库内已有同哈希文件，不限设备）
+// 则直接跳过上传。仅做探测不建记录——同内容文件在库中必有对应条目。
+api.MapPost("/upload/exists", (List<string> shas) =>
+{
+    var list = shas.Where(s => !string.IsNullOrWhiteSpace(s))
+        .Select(s => s.ToLowerInvariant()).Distinct().Take(1000).ToList();
+    return Results.Ok(new { existing = db.ExistingShas(list) });
+});
+
 api.MapPost("/upload/init", (UploadInitRequest req) =>
 {
     if (string.IsNullOrWhiteSpace(req.RelPath) || string.IsNullOrWhiteSpace(req.Device)

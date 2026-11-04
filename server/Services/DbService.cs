@@ -102,6 +102,28 @@ public class DbService
     }
 
     /// <summary>
+    /// 批量探测已存在的文件哈希（不限设备）：网页端上传前预校验用，
+    /// 命中即「秒传」跳过上传。返回库中实际存在的 sha 子集。
+    /// </summary>
+    public List<string> ExistingShas(List<string> shas)
+    {
+        var found = new List<string>();
+        if (shas.Count == 0) return found;
+        using var c = OpenConn();
+        using var cmd = c.CreateCommand();
+        var names = new List<string>();
+        for (var i = 0; i < shas.Count; i++)
+        {
+            names.Add($"@s{i}");
+            cmd.Parameters.AddWithValue($"@s{i}", shas[i]);
+        }
+        cmd.CommandText = $"SELECT DISTINCT sha256 FROM recordings WHERE sha256 IN ({string.Join(",", names)})";
+        using var r = cmd.ExecuteReader();
+        while (r.Read()) found.Add(r.GetString(0));
+        return found;
+    }
+
+    /// <summary>
     /// 插入或去重命中更新。返回 (id, isNew)：isNew=false 表示 (device, sha256)
     /// 命中已有记录（调用方可据此跳过重复转写、在上传响应中告知客户端）。
     /// </summary>
