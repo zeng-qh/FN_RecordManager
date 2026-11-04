@@ -403,7 +403,8 @@ async function triggerTranscribe(id) {
 // 上传时 init 返回已收分片，只补缺失部分——刷新页面也不丢进度。
 // 1MB 分片：公网/弱网上行（~100KB/s）也能在反向代理连接超时（通常 30s）内
 // 传完单片，避免分片反复被掐断导致"卡住"的观感；局域网下效率影响可忽略。
-const CHUNK_SIZE = 1024 * 1024;
+// 分片 512KB：弱网上行 30s 内更易传完（平台反代约 30s 会掐断长请求）
+const CHUNK_SIZE = 512 * 1024;
 
 function openUpload() {
   $("#uploadModal").hidden = false;
@@ -466,7 +467,7 @@ async function runUploadItem(item) {
     const totalChunks = Math.ceil(f.size / CHUNK_SIZE) || 1;
     const mtime = Math.floor((f.lastModified || Date.now()) / 1000);
 
-    // init：命中已有会话时返回已收分片，实现断点续传
+    // init：命中已有会话时返回已收分片，实现断点续传（30s 超时防挂起）
     const initRes = await api("/api/upload/init", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -474,13 +475,16 @@ async function runUploadItem(item) {
         relPath: f.name, device: "web", mtime,
         size: f.size, chunkSize: CHUNK_SIZE, totalChunks,
       }),
+      signal: AbortSignal.timeout(30000),
     });
     if (!initRes.ok) throw new Error("init HTTP " + initRes.status);
     const init = await initRes.json();
     const received = new Set(init.received || []);
-    let doneCount = received.size;
-    const drawProgress = () => {
-      const pct = Math.round((doneCount / totalChunks) * 100);
+    const chunkBytes = (i) => Math.min(CHUNK_SIZE, f.size - i * CHUNK_SIZE);
+    let uploadedBytes = 0;
+    for (const i of received) uploadedBytes += chunkBytes(i);
+    const drawProgress = (extraBytes = 0) => {
+      const pct = Math.min(100, Math.round(((uploadedBytes + extraBytes) / f.size) * 100));
       item.fill.style.width = pct + "%";
       setItemState(item, "uploading", `上传中 ${pct}%${received.size ? "（续传）" : ""}`);
     };
@@ -489,13 +493,16 @@ async function runUploadItem(item) {
     for (let i = 0; i < totalChunks; i++) {
       if (received.has(i)) continue; // 断点续传：跳过已传分片
       const blob = f.slice(i * CHUNK_SIZE, Math.min((i + 1) * CHUNK_SIZE, f.size));
-      await putChunkWithRetry(init.uploadId, i, blob);
-      doneCount += 1;
+      await putChunkWithRetry(init.uploadId, i, blob, (loaded) => drawProgress(loaded));
+      uploadedBytes += blob.size;
       drawProgress();
     }
 
     setItemState(item, "uploading", "合并校验…");
-    const compRes = await api(`/api/upload/complete/${init.uploadId}`, { method: "POST" });
+    const compRes = await api(`/api/upload/complete/${init.uploadId}`, {
+      method: "POST",
+      signal: AbortSignal.timeout(60000), // 合并含 SHA-256 计算，大文件给足时间
+    });
     if (!compRes.ok) {
       const d = await compRes.json().catch(() => ({}));
       throw new Error(d.error || "complete HTTP " + compRes.status);
@@ -517,24 +524,37 @@ async function runUploadItem(item) {
   }
 }
 
-async function putChunkWithRetry(uploadId, index, blob, retries = 3) {
+// 单片 PUT（XHR）：fetch 不支持上传进度，XHR 的 upload.onprogress 可提供字节级实时进度。
+// token 同时放 query（与 api() 一致，兜底反代剥离 Authorization 头）。
+function putChunkOnce(uploadId, index, blob, onProgress) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(state.server.replace(/\/$/, "") + `/api/upload/chunk/${uploadId}/${index}`);
+    if (state.token) url.searchParams.set("token", state.token);
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", url);
+    xhr.timeout = 60000; // 单片硬超时：弱网下不无限挂起
+    xhr.responseType = "json";
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(e.loaded);
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) resolve(xhr.response || {});
+      else reject(new Error("chunk HTTP " + xhr.status));
+    };
+    xhr.onerror = () => reject(new Error("network error"));
+    xhr.ontimeout = () => reject(new Error("timeout"));
+    xhr.send(blob);
+  });
+}
+
+async function putChunkWithRetry(uploadId, index, blob, onProgress, retries = 3) {
   for (let attempt = 0; ; attempt++) {
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 60000); // 单片硬超时：弱网下不无限挂起
     try {
-      const res = await api(`/api/upload/chunk/${uploadId}/${index}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/octet-stream" },
-        body: blob,
-        signal: ac.signal,
-      });
-      if (!res.ok) throw new Error("chunk HTTP " + res.status);
-      return await res.json();
+      return await putChunkOnce(uploadId, index, blob, onProgress);
     } catch (err) {
+      if (onProgress) onProgress(0); // 重试时进度回退归零
       if (attempt >= retries) throw err;
       await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt)); // 指数退避 1s/2s/4s
-    } finally {
-      clearTimeout(timer);
     }
   }
 }
