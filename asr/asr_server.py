@@ -27,6 +27,17 @@ app = FastAPI(title="VoiceVault ASR")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 _model_cache = {}
+_s2t_converter = None
+
+
+def to_simplified(text: str) -> str:
+    """繁体 → 简体（opencc t2s；对英文/数字等非中文内容恒等无损）。"""
+    global _s2t_converter
+    if _s2t_converter is None:
+        from opencc import OpenCC
+
+        _s2t_converter = OpenCC("t2s")
+    return _s2t_converter.convert(text)
 
 
 def get_model(model_size: str):
@@ -63,16 +74,23 @@ def transcribe(
 
     try:
         segments, info = model_inst.transcribe(
-            tmp_path, beam_size=5, vad_filter=True, language=None
+            tmp_path, beam_size=5, vad_filter=True, language=None,
+            # 引导普通话上下文：减少幻觉/方言偏置，简繁由后处理统一
+            initial_prompt="以下是普通话的句子。",
         )
+        # 中文输出统一转为简体（检测为中文语言时）
+        zh = bool(info.language) and str(info.language).lower().startswith("zh")
         out_segments = []
         speaker_idx = 0
         prev_end = 0.0
         for seg in segments:
+            seg_text = seg.text.strip()
+            if zh:
+                seg_text = to_simplified(seg_text)
             seg_dict = {
                 "start": round(seg.start, 2),
                 "end": round(seg.end, 2),
-                "text": seg.text.strip(),
+                "text": seg_text,
             }
             # 简易说话人标注：仅作占位，真正分段需 pyannote（需 HF token）
             if diarize:

@@ -196,11 +196,13 @@ let detailId = null;
 let detailRec = null; // 当前详情录音（保存标题/备注用）
 let detailPollTimer = null;
 let detailTranscriptData = null;
+let detailSegEls = []; // [{start,end,el}] 用于播放进度高亮与滚动跟随
 
 async function openDetail(id) {
   stopDetailPoll();
   detailId = id;
   detailTranscriptData = null;
+  detailSegEls = [];
   try {
     const res = await api(`/api/recordings/${id}`);
     if (!res.ok) { setStatus("详情获取失败（HTTP " + res.status + "）"); return; }
@@ -282,6 +284,7 @@ async function loadDetailTranscript(id) {
 
 function renderDetailTranscript(data) {
   detailTranscriptData = data;
+  detailSegEls = [];
   const box = $("#dTranscript");
   box.innerHTML = "";
   if (data.language) box.appendChild(el("div", "d-lang", "识别语言：" + escapeHtml(data.language)));
@@ -294,6 +297,7 @@ function renderDetailTranscript(data) {
         const audio = $("#dAudio");
         if (audio && audio.src) { audio.currentTime = seg.start; audio.play().catch(() => {}); }
       };
+      detailSegEls.push({ start: seg.start, end: seg.end, el: line });
       box.appendChild(line);
     }
   } else if (data.text) {
@@ -301,6 +305,20 @@ function renderDetailTranscript(data) {
   } else {
     box.appendChild(el("div", "d-empty", "（无文字内容）"));
   }
+}
+
+// 播放进度 → 文字稿高亮 + 滚动跟随（仅当高亮段变化时滚动，避免抖动）
+let lastActiveSegEl = null;
+function syncTranscriptHighlight(curSec) {
+  const hit = detailSegEls.find((s) => curSec >= s.start && curSec < s.end);
+  const target = hit ? hit.el : null;
+  if (target === lastActiveSegEl) return;
+  if (lastActiveSegEl) lastActiveSegEl.classList.remove("active");
+  if (target) {
+    target.classList.add("active");
+    target.scrollIntoView({ block: "nearest" });
+  }
+  lastActiveSegEl = target;
 }
 
 function startDetailPoll(id) {
@@ -813,6 +831,7 @@ document.addEventListener("keydown", (e) => {
     } else if (audio.currentTime) {
       $("#dState").textContent = fmtSec(audio.currentTime);
     }
+    syncTranscriptHighlight(audio.currentTime);
   };
 })();
 

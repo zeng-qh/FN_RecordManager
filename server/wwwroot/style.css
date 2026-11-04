@@ -239,7 +239,10 @@ main { flex: 1; padding: 20px; max-width: 900px; width: 100%; margin: 0 auto; }
   border-right: 1px solid var(--border);
   overflow-y: auto;
 }
-.d-right { padding: 18px; overflow-y: auto; min-width: 0; }
+.d-right {
+  padding: 18px; min-width: 0;
+  display: flex; flex-direction: column; overflow: hidden;
+}
 
 .d-player-card {
   display: flex; gap: 14px; align-items: center;
@@ -292,6 +295,7 @@ main { flex: 1; padding: 20px; max-width: 900px; width: 100%; margin: 0 auto; }
 .d-trans-head {
   display: flex; justify-content: space-between; align-items: center;
   margin-bottom: 10px; gap: 10px; flex-wrap: wrap;
+  flex-shrink: 0; /* 滚动时标题/操作按钮保持可见 */
 }
 .d-trans-head h3 { margin: 0; font-size: 14px; color: var(--muted); }
 .d-trans-actions { display: flex; gap: 8px; }
@@ -302,7 +306,21 @@ main { flex: 1; padding: 20px; max-width: 900px; width: 100%; margin: 0 auto; }
 }
 .d-trans-actions button:hover { border-color: var(--accent); }
 
-.d-transcript { font-size: 13px; line-height: 1.9; }
+/* 文字稿独立滚动：标题固定，内容区可滑动查看全部识别文字 */
+.d-transcript {
+  font-size: 13px; line-height: 1.9;
+  flex: 1; min-height: 0;
+  overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
+  padding: 2px 8px 12px 2px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(128,128,128,0.4) transparent;
+}
+.d-transcript::-webkit-scrollbar { width: 8px; }
+.d-transcript::-webkit-scrollbar-track { background: transparent; }
+.d-transcript::-webkit-scrollbar-thumb {
+  background: rgba(128,128,128,0.35); border-radius: 4px;
+}
+.d-transcript::-webkit-scrollbar-thumb:hover { background: rgba(128,128,128,0.55); }
 .d-transcript .seg { cursor: pointer; display: block; padding: 2px 6px; border-radius: 6px; }
 .d-transcript .seg:hover { background: rgba(79,157,255,0.12); }
 .d-transcript .seg.active { background: rgba(79,157,255,0.22); }
@@ -316,5 +334,7 @@ main { flex: 1; padding: 20px; max-width: 900px; width: 100%; margin: 0 auto; }
   .detail-body { display: flex; flex-direction: column; overflow-y: auto; }
   .d-left { border-right: none; border-bottom: 1px solid var(--border); overflow-y: visible; }
   .d-right { overflow-y: visible; }
+  /* 移动端恢复自然高度，跟随整页滚动，避免嵌套滚动区 */
+  .d-transcript { overflow-y: visible; max-height: none; }
   .detail { height: 92vh; }
 }
