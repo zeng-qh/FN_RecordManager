@@ -305,6 +305,26 @@ public class DbService
         return Convert.ToInt64(cmd.ExecuteScalar());
     }
 
+    /// <summary>
+    /// 全库聚合统计（前端顶部统计条）：总数、总字节、总时长（秒）、已转写条数。
+    /// 单次全表聚合查询，量级（万条内）开销可忽略。
+    /// </summary>
+    public (long Count, long Bytes, double DurationSec, long Transcribed) GetStats()
+    {
+        using var c = OpenConn();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = """
+            SELECT COUNT(*),
+                   COALESCE(SUM(size), 0),
+                   COALESCE(SUM(duration_sec), 0),
+                   SUM(CASE WHEN transcript_status = 'done' THEN 1 ELSE 0 END)
+            FROM recordings
+            """;
+        using var r = cmd.ExecuteReader();
+        r.Read();
+        return (r.GetInt64(0), r.GetInt64(1), r.IsDBNull(2) ? 0 : r.GetDouble(2), r.IsDBNull(3) ? 0 : r.GetInt64(3));
+    }
+
     /// <summary>最旧一条录音的 id（容量策略逐条删除用）；空库返回 null。</summary>
     public long? GetOldestId()
     {

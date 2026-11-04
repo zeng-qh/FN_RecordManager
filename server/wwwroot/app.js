@@ -103,7 +103,22 @@ async function loadRecordings(reset = true) {
     if (data.items.length === 0 && reset) {
       $("#timeline").appendChild(el("div", "empty", "还没有备份的录音。先用手机端/上传器同步一些吧。"));
     }
-    setStatus(`共 ${total} 条 · 已加载 ${Math.min(loaded, total)} 条`);
+    // 顶部统计条：总数 + 已转写 + 总时长 + 总占用（stats 接口失败时退回简单计数）
+    try {
+      const sRes = await api(`/api/stats`);
+      if (sRes.ok) {
+        const s = await sRes.json();
+        const dur = fmtDuration(s.totalDurationSec);
+        setStatus(
+          `共 ${total} 条 · 已转写 ${s.transcribed ?? "—"} · ` +
+          `总时长 ${dur ?? "—"} · 占用 ${fmtSize(s.totalBytes ?? 0)}`
+        );
+      } else {
+        setStatus(`共 ${total} 条 · 已加载 ${Math.min(loaded, total)} 条`);
+      }
+    } catch {
+      setStatus(`共 ${total} 条 · 已加载 ${Math.min(loaded, total)} 条`);
+    }
     if (loaded < total) {
       ensureLoadMore(total, loaded);
     } else {
@@ -383,16 +398,22 @@ function transcriptPlainText(d) {
 async function copyTranscript() {
   const text = transcriptPlainText(detailTranscriptData);
   if (!text) { alert("暂无可复制的文字稿。"); return; }
+  const btn = $("#dCopy");
+  const flash = () => {
+    btn.textContent = "已复制 ✓";
+    setTimeout(() => { btn.textContent = "复制全文"; }, 1500);
+  };
   try {
     await navigator.clipboard.writeText(text);
     setStatus("文字稿已复制到剪贴板。");
+    flash();
   } catch (e) {
     // 非 HTTPS 环境降级
     const ta = el("textarea");
     ta.value = text;
     document.body.appendChild(ta);
     ta.select();
-    try { document.execCommand("copy"); setStatus("文字稿已复制到剪贴板。"); }
+    try { document.execCommand("copy"); setStatus("文字稿已复制到剪贴板。"); flash(); }
     catch (e2) { alert("复制失败，请手动选择文本。"); }
     ta.remove();
   }
@@ -864,6 +885,30 @@ $("#detailModal").addEventListener("click", (e) => {
 });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !$("#detailModal").hidden) closeDetail();
+});
+
+// 详情页键盘快捷键：空格 播放/暂停，←/→ 快退/快进 5 秒
+// （输入框聚焦时不劫持按键；列表页弹窗关闭时不生效）
+document.addEventListener("keydown", (e) => {
+  const modal = $("#detailModal");
+  if (modal.hidden) return;
+  const tag = document.activeElement?.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+  const audio = $("#dAudio");
+  if (!audio || !audio.src) return;
+  if (e.code === "Space") {
+    e.preventDefault();
+    if (audio.paused) audio.play().catch(() => {});
+    else audio.pause();
+  } else if (e.key === "ArrowLeft") {
+    audio.currentTime = Math.max(0, audio.currentTime - 5);
+  } else if (e.key === "ArrowRight") {
+    if (isFinite(audio.duration)) {
+      audio.currentTime = Math.min(audio.duration, audio.currentTime + 5);
+    } else {
+      audio.currentTime += 5;
+    }
+  }
 });
 
 // 详情页播放器状态

@@ -278,6 +278,19 @@ api.MapPost("/upload/complete/{uploadId}", async (string uploadId) =>
     }
 });
 
+// 全库聚合统计（前端顶部统计条）
+api.MapGet("/stats", () =>
+{
+    var (count, bytes, dur, transcribed) = db.GetStats();
+    return Results.Ok(new
+    {
+        count,
+        totalBytes = bytes,
+        totalDurationSec = dur,
+        transcribed
+    });
+});
+
 // 录音列表（分页 + 时间范围 + 关键词）
 api.MapGet("/recordings", (int page = 1, int pageSize = 50, long from = 0, long to = 0, string? q = null) =>
 {
