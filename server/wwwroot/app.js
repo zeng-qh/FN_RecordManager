@@ -85,7 +85,7 @@ function fmtDuration(sec) {
 
 // ---- 加载与渲染 ----
 async function loadRecordings(reset = true) {
-  if (state.loading) return;
+  if (state.loading) return false;
   state.loading = true;
   if (reset) {
     state.page = 1;
@@ -104,6 +104,10 @@ async function loadRecordings(reset = true) {
       params.set("from", Math.floor(new Date(fy, fm - 1, 1).getTime() / 1000));
       params.set("to", Math.floor(new Date(fy, fm, 1).getTime() / 1000) - 1); // 月末 23:59:59
     }
+    // 统计与列表并行请求：总耗时取两者较大值而非相加，列表首屏更快
+    const statsPromise = api(`/api/stats`)
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null);
     const res = await api(`/api/recordings?${params}`);
     const data = await res.json();
     renderItems(data.items || []);
@@ -113,20 +117,15 @@ async function loadRecordings(reset = true) {
     if (data.items.length === 0 && reset) {
       $("#timeline").appendChild(el("div", "empty", "还没有备份的录音。先用手机端/上传器同步一些吧。"));
     }
-    // 顶部统计条：总数 + 已转写 + 总时长 + 总占用（stats 接口失败时退回简单计数）
-    try {
-      const sRes = await api(`/api/stats`);
-      if (sRes.ok) {
-        const s = await sRes.json();
-        const dur = fmtDuration(s.totalDurationSec);
-        setStatus(
-          `共 ${total} 条 · 已转写 ${s.transcribed ?? "—"} · ` +
-          `总时长 ${dur ?? "—"} · 占用 ${fmtSize(s.totalBytes ?? 0)}`
-        );
-      } else {
-        setStatus(`共 ${total} 条 · 已加载 ${Math.min(loaded, total)} 条`);
-      }
-    } catch {
+    // 顶部统计条：并行请求此刻通常已就绪，不再额外等待一个往返
+    const s = await statsPromise;
+    if (s) {
+      const dur = fmtDuration(s.totalDurationSec);
+      setStatus(
+        `共 ${total} 条 · 已转写 ${s.transcribed ?? "—"} · ` +
+        `总时长 ${dur ?? "—"} · 占用 ${fmtSize(s.totalBytes ?? 0)}`
+      );
+    } else {
       setStatus(`共 ${total} 条 · 已加载 ${Math.min(loaded, total)} 条`);
     }
     if (loaded < total) {
@@ -139,14 +138,20 @@ async function loadRecordings(reset = true) {
   } finally {
     state.loading = false;
   }
+  return true;
 }
 
-// 有转写任务进行中时，列表自动轻量刷新（3s），让徽标百分比走动；无任务即停
+// 有转写任务进行中时，列表自动轻量刷新（3s），让徽标百分比走动；无任务即停。
+// 刷新后恢复滚动位置：正在翻看历史时不会被拉回顶部。
 let pendingRefreshTimer = null;
 function schedulePendingRefresh(items) {
   clearTimeout(pendingRefreshTimer);
   if (items.some((it) => it.transcriptStatus === "pending")) {
-    pendingRefreshTimer = setTimeout(() => loadRecordings(true), 3000);
+    pendingRefreshTimer = setTimeout(async () => {
+      const y = window.scrollY;
+      const ok = await loadRecordings(true);
+      if (ok) window.scrollTo(0, y);
+    }, 3000);
   }
 }
 
@@ -646,9 +651,13 @@ async function runUploadItem(item) {
       const d = await compRes.json().catch(() => ({}));
       throw new Error(d.error || "complete HTTP " + compRes.status);
     }
+    // dedup=true：同内容文件服务器已有，仅去重命中（未重复存储，返回的 id 是原记录）
+    const comp = await compRes.json().catch(() => ({}));
     item.fill.style.width = "100%";
-    setItemState(item, "done", "✓ 已上传" + (received.size ? "（断点续传完成）" : ""));
-    setStatus(`已上传：${f.name}`);
+    setItemState(item, "done", comp.dedup
+      ? "✓ 已在服务器（去重跳过）"
+      : "✓ 已上传" + (received.size ? "（断点续传完成）" : ""));
+    setStatus(comp.dedup ? `服务器已有：${f.name}（已去重，未重复存储）` : `已上传：${f.name}`);
     loadRecordings(true);
   } catch (err) {
     setItemState(item, "failed", "");

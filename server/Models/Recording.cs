@@ -1,5 +1,7 @@
 namespace VoiceVault.Server.Models;
 
+using System.Text.Json.Serialization;
+
 /// <summary>
 /// 一条已备份录音在服务端的元数据。
 /// </summary>
@@ -16,7 +18,11 @@ public class Recording
     /// <summary>文件名（用于展示与检索）。</summary>
     public string FileName { get; set; } = "";
 
-    /// <summary>服务端落盘的绝对路径。</summary>
+    /// <summary>
+    /// 服务端落盘的绝对路径。仅服务端内部使用（删除/播放寻址），
+    /// 序列化给前端时隐藏，避免泄露服务器文件系统结构。
+    /// </summary>
+    [JsonIgnore]
     public string StoredPath { get; set; } = "";
 
     /// <summary>字节大小。</summary>
@@ -37,7 +43,11 @@ public class Recording
     /// <summary>转写状态：none / idle（待闲时）/ pending / done / error。</summary>
     public string? TranscriptStatus { get; set; } = "none";
 
-    /// <summary>转写结果 JSON 的路径。</summary>
+    /// <summary>
+    /// 转写结果 JSON 的路径。仅服务端内部使用（读取/删除寻址），
+    /// 序列化给前端时隐藏（前端经 /transcript 端点取内容）。
+    /// </summary>
+    [JsonIgnore]
     public string? TranscriptPath { get; set; }
 
     /// <summary>识别出的语言代码。</summary>

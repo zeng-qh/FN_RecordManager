@@ -16,6 +16,15 @@ public class DbService
         Directory.CreateDirectory(dataDir);
         _conn = $"Data Source={Path.Combine(dataDir, "voicvault.db")}";
 
+        // journal_mode=WAL 是数据库级持久属性，写进库文件后对所有连接生效，
+        // 只需设置一次；无需每次开连接都执行（减少每查询固定开销）。
+        using (var wal = OpenConn())
+        using (var walCmd = wal.CreateCommand())
+        {
+            walCmd.CommandText = "PRAGMA journal_mode=WAL;";
+            walCmd.ExecuteNonQuery();
+        }
+
         using var c = OpenConn();
         using var cmd = c.CreateCommand();
         cmd.CommandText = """
@@ -66,15 +75,18 @@ public class DbService
         }
     }
 
-    /// <summary>打开连接并应用并发/崩溃安全 PRAGMA（WAL + 同步 + 忙等待）。</summary>
+    /// <summary>
+    /// 打开连接并应用连接级 PRAGMA（同步策略 + 忙等待）。
+    /// WAL 已在构造器一次性设置（数据库级持久属性），此处不再重复。
+    /// </summary>
     private SqliteConnection OpenConn()
     {
         var c = new SqliteConnection(_conn);
         c.Open();
         using var p = c.CreateCommand();
-        // WAL：写不阻塞读，崩溃恢复更安全；NORMAL 同步在 WAL 下足够安全且更快；
+        // NORMAL 同步在 WAL 下足够安全且更快；
         // busy_timeout：并发读写（上传写 + 转写写 + 列表读）时等待而非立即报 locked。
-        p.CommandText = "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;";
+        p.CommandText = "PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;";
         p.ExecuteNonQuery();
         return c;
     }
@@ -89,10 +101,23 @@ public class DbService
         return cmd.ExecuteScalar() != null;
     }
 
-    public long Upsert(Recording r)
+    /// <summary>
+    /// 插入或去重命中更新。返回 (id, isNew)：isNew=false 表示 (device, sha256)
+    /// 命中已有记录（调用方可据此跳过重复转写、在上传响应中告知客户端）。
+    /// </summary>
+    public (long Id, bool IsNew) Upsert(Recording r)
     {
         using var c = OpenConn();
         using var cmd = c.CreateCommand();
+
+        // 先探测是否命中已有记录：ON CONFLICT DO UPDATE 无法区分插入与更新
+        cmd.CommandText = "SELECT id FROM recordings WHERE device=@device AND sha256=@sha";
+        cmd.Parameters.AddWithValue("@device", r.Device);
+        cmd.Parameters.AddWithValue("@sha", r.Sha256);
+        var existing = cmd.ExecuteScalar();
+        if (existing is not null)
+            return (Convert.ToInt64(existing), false);
+
         cmd.CommandText = """
             INSERT INTO recordings
                 (device, rel_path, file_name, stored_path, size, mtime, sha256, title,
@@ -106,13 +131,11 @@ public class DbService
                 mtime   = excluded.mtime,
                 title   = excluded.title;
             """;
-        cmd.Parameters.AddWithValue("@device", r.Device);
         cmd.Parameters.AddWithValue("@rel", r.RelPath);
         cmd.Parameters.AddWithValue("@fn", r.FileName);
         cmd.Parameters.AddWithValue("@sp", r.StoredPath);
         cmd.Parameters.AddWithValue("@size", r.Size);
         cmd.Parameters.AddWithValue("@mtime", r.Mtime);
-        cmd.Parameters.AddWithValue("@sha", r.Sha256);
         cmd.Parameters.AddWithValue("@title", (object?)r.Title ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@ra", r.RecordedAt);
         cmd.Parameters.AddWithValue("@ts", (object?)r.TranscriptStatus ?? DBNull.Value);
@@ -124,7 +147,7 @@ public class DbService
         cmd.ExecuteNonQuery();
 
         cmd.CommandText = "SELECT id FROM recordings WHERE device=@device AND sha256=@sha";
-        return Convert.ToInt64(cmd.ExecuteScalar());
+        return (Convert.ToInt64(cmd.ExecuteScalar()), true);
     }
 
     public Recording? GetById(long id)

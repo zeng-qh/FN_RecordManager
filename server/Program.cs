@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.Data.Sqlite;
 using System.IO.Compression;
 using System.Security.Cryptography;
@@ -55,6 +56,16 @@ builder.Services.Configure<FormOptions>(o =>
     o.MemoryBufferThreshold = 256 * 1024; // 超过 256KB 即缓冲到磁盘，避免整段录音进内存
 });
 
+// 响应压缩（Brotli/Gzip）：列表与文字稿 JSON 体积大降（长文字稿可到数百 KB），
+// 弱网/公网访问体感明显。默认 MIME 白名单只含 text/* 与 JSON 类，
+// 音频（audio/*）与 ZIP（application/zip）本身已压缩，不在列表中不会被误压。
+builder.Services.AddResponseCompression(o =>
+{
+    o.EnableForHttps = true;
+    o.Providers.Add<BrotliCompressionProvider>();
+    o.Providers.Add<GzipCompressionProvider>();
+});
+
 var app = builder.Build();
 
 var db = app.Services.GetRequiredService<DbService>();
@@ -100,8 +111,17 @@ app.Use(async (ctx, next) =>
     await next();
 });
 
+// 压缩中间件需在响应写入前注册；置于静态文件之前使其一并生效
+app.UseResponseCompression();
+
+// 静态资源协商缓存：Cache-Control: no-cache 让浏览器每次带 ETag 校验，
+// 命中返回 304（省流量），服务端更新后立即可见——无需手动强刷
 app.UseDefaultFiles();
-app.UseStaticFiles();
+app.UseStaticFiles(new StaticFileOptions
+{
+    OnPrepareResponse = ctx =>
+        ctx.Context.Response.Headers["Cache-Control"] = "no-cache"
+});
 
 var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
 
@@ -154,7 +174,8 @@ catch (Exception ex) { logger.LogWarning(ex, "Contact backfill failed"); }
 
 api.MapGet("/health", () =>
 {
-    // NAS 部署核心水位：磁盘剩余空间、录音数与总占用（供监控与容量规划参考）
+    // NAS 部署核心水位：磁盘剩余空间、录音数与总占用（供监控与容量规划参考）。
+    // 复用 GetStats 单次聚合，避免 Count + TotalBytes 两次开连接。
     long diskFree = 0;
     try
     {
@@ -163,14 +184,15 @@ api.MapGet("/health", () =>
     }
     catch { /* 磁盘信息不可得时不阻塞健康检查 */ }
 
+    var (count, bytes, _, _) = db.GetStats();
     return Results.Ok(new
     {
         status = "ok",
         asr = cfg.Asr.Enabled,
-        version = "1.1.0",
+        version = "1.2.0",
         diskFreeBytes = diskFree,
-        recordings = db.Count(0, 0, null),
-        totalBytes = db.TotalBytes()
+        recordings = count,
+        totalBytes = bytes
     });
 });
 
@@ -214,9 +236,9 @@ api.MapPost("/upload", async (HttpContext ctx) =>
 
     try
     {
-        var (id, sha) = await CompleteRecordingAsync(
+        var (id, sha, dedup) = await CompleteRecordingAsync(
             file.OpenReadStream(), relPath, device, expectedSha, mtime);
-        return Results.Ok(new { id, status = "uploaded", sha });
+        return Results.Ok(new { id, status = "uploaded", sha, dedup });
     }
     catch (InvalidDataException ex)
     {
@@ -282,10 +304,10 @@ api.MapPost("/upload/complete/{uploadId}", async (string uploadId) =>
     {
         // 零拷贝拼接流直接交给落盘/去重/入库公共逻辑
         await using var concat = new ConcatenatedStream(session.PartPaths);
-        var (id, sha) = await CompleteRecordingAsync(
+        var (id, sha, dedup) = await CompleteRecordingAsync(
             concat, session.RelPath, session.Device, "", session.Mtime);
         chunks.Remove(uploadId); // 成功后清理会话；失败保留分片可重试 complete
-        return Results.Ok(new { id, status = "uploaded", sha });
+        return Results.Ok(new { id, status = "uploaded", sha, dedup });
     }
     catch (InvalidDataException ex)
     {
@@ -587,14 +609,18 @@ static int ClampHour(int h) => Math.Clamp(h, 0, 23);
 /// <summary>
 /// 上传收尾公共逻辑（单请求 multipart 与分片拼接共用）：
 /// 流式落盘算 SHA → 入库去重 → 清理去重孤儿副本 → 按转写时机分流。
-/// 成功返回 (id, sha)；校验失败抛 InvalidDataException，其余异常向上传播。
+/// 成功返回 (id, sha, dedup)；dedup=true 表示该文件 (device+sha) 服务器已有，
+/// 本次仅去重命中——调用方不应把返回的 id 当作「新上传」处理（如删除）。
+/// 校验失败抛 InvalidDataException，其余异常向上传播。
 /// </summary>
-async Task<(long Id, string Sha)> CompleteRecordingAsync(
+async Task<(long Id, string Sha, bool Dedup)> CompleteRecordingAsync(
     Stream content, string relPath, string device, string expectedSha, long mtime)
 {
     var (storedPath, recordedAt, actualSha, size) =
         await storage.SaveAsync(content, relPath, expectedSha, mtime);
 
+    // 来源分类：从原始路径自动提取（电话号码 / 微信联系人），可后续手动改
+    var (contact, contactKind) = ContactExtractor.Extract(relPath);
     var rec = new Recording
     {
         Device = device,
@@ -607,18 +633,17 @@ async Task<(long Id, string Sha)> CompleteRecordingAsync(
         Title = Path.GetFileName(relPath),
         RecordedAt = recordedAt,
         TranscriptStatus = "none",
-        // 来源分类：从原始路径自动提取（电话号码 / 微信联系人），可后续手动改
-        Contact = ContactExtractor.Extract(relPath).Contact,
-        ContactKind = ContactExtractor.Extract(relPath).Kind,
+        Contact = contact,
+        ContactKind = contactKind,
         CreatedAt = DateTime.UtcNow
     };
-    var id = db.Upsert(rec);
-    logger.LogInformation("Uploaded {RelPath} -> id={Id} size={Size}", relPath, id, size);
+    var (id, isNew) = db.Upsert(rec);
+    logger.LogInformation("Uploaded {RelPath} -> id={Id} size={Size} dedup={Dedup}",
+        relPath, id, size, !isNew);
 
-    // 去重命中（device+sha 已存在）时，ON CONFLICT 保留原落盘路径，
-    // 本次刚写入的副本成为孤儿文件，这里清理掉
-    var current = db.GetById(id);
-    if (current is not null && !string.Equals(current.StoredPath, storedPath, StringComparison.Ordinal))
+    // 去重命中：原记录的落盘路径与转写状态保持原样，本次刚写入的副本成为
+    // 孤儿文件，这里清理掉；也不重复入队转写（原记录状态已定）
+    if (!isNew)
     {
         try
         {
@@ -629,6 +654,7 @@ async Task<(long Id, string Sha)> CompleteRecordingAsync(
         {
             logger.LogWarning(ex, "Failed to remove duplicate copy {Path}", storedPath);
         }
+        return (id, actualSha, true);
     }
 
     // 转写触发：按用户设定的模式处理
@@ -654,7 +680,7 @@ async Task<(long Id, string Sha)> CompleteRecordingAsync(
         }
     }
 
-    return (id, actualSha);
+    return (id, actualSha, false);
 }
 
 /// <summary>导出 TXT：每段一行「[mm:ss] (说话人)文本」，与网页端复制格式一致。</summary>
