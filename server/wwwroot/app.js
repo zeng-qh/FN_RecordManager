@@ -9,7 +9,7 @@ const state = {
   page: 1,
   pageSize: 50,
   loading: false,
-  asrEnabled: false,
+  asrEnabled: true, // 与服务端默认开启一致（实际值以 /api/settings 回填为准）
   q: "",
 };
 
@@ -97,6 +97,7 @@ async function loadRecordings(reset = true) {
     const res = await api(`/api/recordings?${params}`);
     const data = await res.json();
     renderItems(data.items || []);
+    schedulePendingRefresh(data.items || []); // 有转写任务时自动刷新列表徽标进度
     const total = data.total || 0;
     const loaded = state.page * state.pageSize;
     if (data.items.length === 0 && reset) {
@@ -112,6 +113,15 @@ async function loadRecordings(reset = true) {
     if (e.message !== "unauthorized") setStatus("加载失败：" + e.message);
   } finally {
     state.loading = false;
+  }
+}
+
+// 有转写任务进行中时，列表自动轻量刷新（3s），让徽标百分比走动；无任务即停
+let pendingRefreshTimer = null;
+function schedulePendingRefresh(items) {
+  clearTimeout(pendingRefreshTimer);
+  if (items.some((it) => it.transcriptStatus === "pending")) {
+    pendingRefreshTimer = setTimeout(() => loadRecordings(true), 3000);
   }
 }
 
@@ -131,9 +141,13 @@ function renderItems(items) {
   }
 }
 
-function statusBadge(status) {
+function statusBadge(it) {
+  const status = it.transcriptStatus;
   if (status === "done") return '<span class="badge done">已转写</span>';
-  if (status === "pending") return '<span class="badge pending">转写中</span>';
+  if (status === "pending") {
+    const p = Math.round(it.transcriptProgress || 0);
+    return `<span class="badge pending">转写中 ${p}%</span>`;
+  }
   if (status === "error") return '<span class="badge error">转写失败</span>';
   if (status === "idle") return '<span class="badge idle">待闲时转写</span>';
   return '<span class="badge">未转写</span>';
@@ -155,7 +169,7 @@ function renderItem(it) {
       `${fmtClock(it.recordedAt)} · ${dur ? dur + " · " : ""}${fmtSize(it.size)} · ${it.device}`)
   );
 
-  const badge = el("div", null, statusBadge(it.transcriptStatus));
+  const badge = el("div", null, statusBadge(it));
   const ops = el("div", "ops");
   if (state.asrEnabled) {
     const tBtn = el("button", null, "转写");
@@ -261,7 +275,7 @@ async function loadDetailTranscript(id) {
       const err = await res.json().catch(() => ({}));
       const st = err.status || "none";
       if (st === "pending") {
-        box.innerHTML = '<div class="d-loading">⏳ 转写进行中，完成后自动显示…</div>';
+        renderPendingProgress(err.progress || 0, err.partial || "");
         startDetailPoll(id);
       } else if (st === "idle") {
         box.innerHTML = '<div class="d-empty">已加入闲时转写队列。<br/>将在设定的空闲时段（服务器本地时区）内自动转写，或点右上「立即转写」马上处理。</div>';
@@ -282,9 +296,24 @@ async function loadDetailTranscript(id) {
   }
 }
 
+// 转写进行中：进度条 + 百分比 + 已转出的部分文字（边转写边显示）
+function renderPendingProgress(progress, partial) {
+  const box = $("#dTranscript");
+  const pct = Math.max(1, Math.min(99, Math.round(progress || 0)));
+  box.innerHTML =
+    `<div class="t-progress">
+       <div class="t-progress-bar"><div class="t-progress-fill" style="width:${pct}%"></div></div>
+       <div class="t-progress-label">⏳ 转写中 ${pct}%${partial ? " · 已识别内容实时显示在下方" : ""}</div>
+     </div>` +
+    (partial
+      ? `<div class="d-partial">${escapeHtml(partial)}</div>`
+      : '<div class="d-loading">正在识别音频内容…</div>');
+}
+
 function renderDetailTranscript(data) {
   detailTranscriptData = data;
   detailSegEls = [];
+  lastActiveSegEl = null; // 重渲染后旧元素引用失效，重置高亮跟踪
   const box = $("#dTranscript");
   box.innerHTML = "";
   if (data.language) box.appendChild(el("div", "d-lang", "识别语言：" + escapeHtml(data.language)));
@@ -333,9 +362,13 @@ function startDetailPoll(id) {
         stopDetailPoll();
         renderDetailTranscript(await res.json());
         loadRecordings(true); // 顺带刷新列表徽标
+      } else if (res.status === 404) {
+        // 仍在转写：刷新进度条与已转出的部分文字
+        const err = await res.json().catch(() => ({}));
+        if (err.status === "pending") renderPendingProgress(err.progress || 0, err.partial || "");
       }
     } catch (e) { /* 网络抖动，继续轮询 */ }
-  }, 3000);
+  }, 1500);
 }
 
 function transcriptPlainText(d) {

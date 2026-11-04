@@ -49,6 +49,12 @@ public class Recording
     /// <summary>转写已失败次数（闲时窗口内自动重试，达上限后仅可手动重试）。</summary>
     public int TranscriptAttempts { get; set; }
 
+    /// <summary>转写进度（0-100）；进行中实时更新，完成/失败后不再变化。</summary>
+    public double TranscriptProgress { get; set; }
+
+    /// <summary>转写进行中已产出的部分文本（流式预览），完成后清空。</summary>
+    public string? TranscriptPartial { get; set; }
+
     /// <summary>用户备注（参与关键词搜索）。</summary>
     public string? Note { get; set; }
 

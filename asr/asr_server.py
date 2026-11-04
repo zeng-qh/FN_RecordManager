@@ -6,8 +6,16 @@ VoiceVault 本地语音转写边车（ASR）
 
 端点：
   GET  /health
-  POST /transcribe   multipart: file=音频, model=模型规模, diarize=bool
+  POST /transcribe            同步转写（兼容旧客户端，长连接等完整结果）
+      multipart: file=音频, model=模型规模, diarize=bool
       → { "text": "...", "segments": [{start,end,text,speaker?}], "language": "zh" }
+  POST /transcribe-async      异步转写：立即返回，后台推理
+      multipart: file=音频, model=模型规模, diarize=bool, task_id=str
+      → { "task_id": "..." }
+  GET  /transcribe-status/{task_id}   查询进度（轮询用）
+      → { "status": "running|done|error", "progress": 0-100,
+          "partial": "已转出的部分文本", "language": "zh",
+          "segments": [...], "text": "...", "error": "..." }
 
 运行：
   pip install -r requirements.txt
@@ -18,16 +26,22 @@ VoiceVault 本地语音转写边车（ASR）
 import argparse
 import os
 import tempfile
+import threading
+import time
+import traceback
 
 import uvicorn
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 app = FastAPI(title="VoiceVault ASR")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 _model_cache = {}
 _s2t_converter = None
+_jobs: dict = {}  # task_id -> {status, progress, partial, language, segments, text, error}
+_jobs_lock = threading.Lock()
 
 
 def to_simplified(text: str) -> str:
@@ -59,31 +73,31 @@ def health():
     return {"status": "ok"}
 
 
-@app.post("/transcribe")
-def transcribe(
-    file: UploadFile = File(...),
-    model: str = Form("small"),
-    diarize: bool = Form(False),
-):
-    model_inst = get_model(model)
+def _run_job(task_id: str, tmp_path: str, model_size: str, diarize: bool):
+    """后台线程：执行转写，逐段更新进度与部分文本。"""
+    job = _jobs[task_id]
 
-    suffix = os.path.splitext(file.filename or "audio.m4a")[1] or ".m4a"
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-        tmp.write(file.file.read())
-        tmp_path = tmp.name
+    def update(**kw):
+        with _jobs_lock:
+            job.update(kw)
 
     try:
+        model_inst = get_model(model_size)
+        update(status="running", progress=1)
+
         segments, info = model_inst.transcribe(
             tmp_path, beam_size=5, vad_filter=True, language=None,
             # 引导普通话上下文：减少幻觉/方言偏置，简繁由后处理统一
             initial_prompt="以下是普通话的句子。",
         )
-        # 中文输出统一转为简体（检测为中文语言时）
         zh = bool(info.language) and str(info.language).lower().startswith("zh")
+        duration = float(getattr(info, "duration", 0.0) or 0.0)
+
         out_segments = []
+        partial_parts = []
         speaker_idx = 0
         prev_end = 0.0
-        for seg in segments:
+        for seg in segments:  # 惰性生成器：产出一段推理一段
             seg_text = seg.text.strip()
             if zh:
                 seg_text = to_simplified(seg_text)
@@ -99,18 +113,111 @@ def transcribe(
                 seg_dict["speaker"] = f"说话人{speaker_idx + 1}"
                 prev_end = seg.end
             out_segments.append(seg_dict)
+            if seg_text:
+                partial_parts.append(seg_text)
+
+            # 进度按音频时间轴估算（VAD 过滤后末段可能略短于总时长）
+            pct = min(99.0, (seg.end / duration * 100.0)) if duration > 0 else 0.0
+            update(
+                status="running",
+                progress=round(max(pct, 1.0), 1),
+                partial=" ".join(partial_parts),
+                language=str(info.language or ""),
+            )
 
         text = " ".join(s["text"] for s in out_segments)
-        return {
-            "text": text,
-            "segments": out_segments,
-            "language": info.language,
-        }
+        update(
+            status="done",
+            progress=100.0,
+            partial=" ".join(partial_parts),
+            language=str(info.language or ""),
+            segments=out_segments,
+            text=text,
+            error=None,
+        )
+    except Exception:
+        update(status="error", error=traceback.format_exc(limit=3))
     finally:
         try:
             os.remove(tmp_path)
         except OSError:
             pass
+        # 任务结果保留 10 分钟供补拉，过期清理
+        time.sleep(600)
+        with _jobs_lock:
+            _jobs.pop(task_id, None)
+
+
+@app.post("/transcribe")
+def transcribe(
+    file: UploadFile = File(...),
+    model: str = Form("small"),
+    diarize: bool = Form(False),
+):
+    """同步转写（兼容保留）：内部复用异步任务，长轮询至完成。"""
+    task_id = f"sync-{time.time_ns()}"
+    suffix = os.path.splitext(file.filename or "audio.m4a")[1] or ".m4a"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(file.file.read())
+        tmp_path = tmp.name
+
+    with _jobs_lock:
+        _jobs[task_id] = {"status": "queued", "progress": 0.0, "partial": "",
+                          "language": None, "segments": None, "text": None, "error": None}
+    threading.Thread(target=_run_job, args=(task_id, tmp_path, model, diarize), daemon=True).start()
+
+    while True:
+        time.sleep(0.5)
+        with _jobs_lock:
+            job = dict(_jobs.get(task_id) or {})
+        if job.get("status") in ("done", "error"):
+            with _jobs_lock:
+                _jobs.pop(task_id, None)
+            if job["status"] == "error":
+                return JSONResponse(status_code=500, content={"error": job.get("error") or "asr failed"})
+            return {
+                "text": job.get("text") or "",
+                "segments": job.get("segments") or [],
+                "language": job.get("language"),
+            }
+
+
+@app.post("/transcribe-async")
+def transcribe_async(
+    file: UploadFile = File(...),
+    model: str = Form("small"),
+    diarize: bool = Form(False),
+    task_id: str = Form(...),
+):
+    """异步转写：落盘音频后立即返回，后台线程推理，进度经 /transcribe-status 查询。"""
+    suffix = os.path.splitext(file.filename or "audio.m4a")[1] or ".m4a"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(file.file.read())
+        tmp_path = tmp.name
+
+    with _jobs_lock:
+        # 同任务重复提交：先清旧状态（调用方语义是重启该任务）
+        _jobs[task_id] = {"status": "queued", "progress": 0.0, "partial": "",
+                          "language": None, "segments": None, "text": None, "error": None}
+    threading.Thread(target=_run_job, args=(task_id, tmp_path, model, diarize), daemon=True).start()
+    return {"task_id": task_id}
+
+
+@app.get("/transcribe-status/{task_id}")
+def transcribe_status(task_id: str):
+    with _jobs_lock:
+        job = _jobs.get(task_id)
+        if job is None:
+            return JSONResponse(status_code=404, content={"error": "task not found"})
+        return {
+            "status": job.get("status"),
+            "progress": job.get("progress", 0.0),
+            "partial": job.get("partial") or "",
+            "language": job.get("language"),
+            "segments": job.get("segments"),
+            "text": job.get("text"),
+            "error": job.get("error"),
+        }
 
 
 if __name__ == "__main__":

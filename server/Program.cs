@@ -262,14 +262,20 @@ api.MapGet("/recordings/{id:long}/file", (HttpContext ctx, long id) =>
         fileDownloadName: rec.FileName, enableRangeProcessing: true);
 });
 
-// 转写文本（若已生成）
+// 转写文本（若已生成；转写进行中返回进度与已转出的部分文本，供前端流式展示）
 api.MapGet("/recordings/{id:long}/transcript", (long id) =>
 {
     var rec = db.GetById(id);
     if (rec is null) return Results.NotFound(new { error = "not found" });
     if (rec.TranscriptStatus != "done" || string.IsNullOrWhiteSpace(rec.TranscriptPath)
         || !File.Exists(rec.TranscriptPath))
-        return Results.NotFound(new { error = "transcript not ready", status = rec.TranscriptStatus });
+        return Results.NotFound(new
+        {
+            error = "transcript not ready",
+            status = rec.TranscriptStatus,
+            progress = rec.TranscriptProgress,
+            partial = rec.TranscriptPartial ?? "",
+        });
 
     var json = File.ReadAllText(rec.TranscriptPath);
     return Results.Content(json, "application/json");

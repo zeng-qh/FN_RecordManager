@@ -47,6 +47,8 @@ public class DbService
             "ALTER TABLE recordings ADD COLUMN duration_sec REAL",              // 录音时长（秒）
             "ALTER TABLE recordings ADD COLUMN transcript_attempts INTEGER NOT NULL DEFAULT 0", // 转写失败重试计数
             "ALTER TABLE recordings ADD COLUMN note TEXT",                      // 用户备注
+            "ALTER TABLE recordings ADD COLUMN transcript_progress REAL NOT NULL DEFAULT 0",    // 转写进度 0-100
+            "ALTER TABLE recordings ADD COLUMN transcript_partial TEXT",        // 转写进行中的部分文本（流式预览）
         })
         {
             try
@@ -161,7 +163,8 @@ public class DbService
     /// </summary>
     private const string ListColumns =
         "id, device, rel_path, file_name, stored_path, size, mtime, sha256, title, recorded_at, " +
-        "transcript_status, transcript_path, language, duration_sec, transcript_attempts, note, created_at";
+        "transcript_status, transcript_path, language, duration_sec, transcript_attempts, " +
+        "transcript_progress, transcript_partial, note, created_at";
 
     /// <summary>
     /// 闲时调度器取数：待闲时（idle）的录音 + 转写失败未达重试上限
@@ -216,16 +219,36 @@ public class DbService
     {
         using var c = OpenConn();
         using var cmd = c.CreateCommand();
+        // 终态/起点统一清空流式字段：done 置进度 100，其余归零；partial 清空
         cmd.CommandText = """
             UPDATE recordings
             SET transcript_status=@ts, transcript_path=@tp, language=@lang,
-                transcript_attempts = MAX(0, transcript_attempts + @delta)
+                transcript_attempts = MAX(0, transcript_attempts + @delta),
+                transcript_progress = @prog,
+                transcript_partial = NULL
             WHERE id=@id
             """;
         cmd.Parameters.AddWithValue("@ts", status);
         cmd.Parameters.AddWithValue("@tp", path);
         cmd.Parameters.AddWithValue("@lang", (object?)lang ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@delta", attemptsDelta);
+        cmd.Parameters.AddWithValue("@prog", status == "done" ? 100.0 : 0.0);
+        cmd.Parameters.AddWithValue("@id", id);
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>转写进行中：更新实时进度（0-100）与已转出的部分文本（流式预览）。</summary>
+    public void UpdateTranscriptProgress(long id, double progress, string partial)
+    {
+        using var c = OpenConn();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = """
+            UPDATE recordings
+            SET transcript_status='pending', transcript_progress=@p, transcript_partial=@t
+            WHERE id=@id AND transcript_status='pending'
+            """;
+        cmd.Parameters.AddWithValue("@p", Math.Clamp(progress, 0, 99.9));
+        cmd.Parameters.AddWithValue("@t", partial);
         cmd.Parameters.AddWithValue("@id", id);
         cmd.ExecuteNonQuery();
     }
@@ -332,6 +355,8 @@ public class DbService
             Language = r.IsDBNull(r.GetOrdinal("language")) ? null : r.GetString(r.GetOrdinal("language")),
             DurationSec = r.IsDBNull(r.GetOrdinal("duration_sec")) ? null : r.GetDouble(r.GetOrdinal("duration_sec")),
             TranscriptAttempts = r.GetInt32(r.GetOrdinal("transcript_attempts")),
+            TranscriptProgress = r.IsDBNull(r.GetOrdinal("transcript_progress")) ? 0 : r.GetDouble(r.GetOrdinal("transcript_progress")),
+            TranscriptPartial = r.IsDBNull(r.GetOrdinal("transcript_partial")) ? null : r.GetString(r.GetOrdinal("transcript_partial")),
             Note = r.IsDBNull(r.GetOrdinal("note")) ? null : r.GetString(r.GetOrdinal("note")),
             CreatedAt = DateTime.TryParse(r.GetString(r.GetOrdinal("created_at")), out var d) ? d : DateTime.MinValue
         };

@@ -92,7 +92,10 @@ public class TranscriptionQueue : BackgroundService
         }
 
         _db.UpdateTranscript(id, "", "pending", null);
-        var result = await _asr.TranscribeAsync(rec.StoredPath, ct);
+        // 边车每产出一段即回调：进度与部分文本实时落库，前端轮询即可流式展示
+        var result = await _asr.TranscribeAsync(id, rec.StoredPath,
+            onProgress: (progress, partial) => _db.UpdateTranscriptProgress(id, progress, partial),
+            ct: ct);
         if (result is null)
         {
             _logger.LogWarning("ASR sidecar returned no result for id={Id}", id);
