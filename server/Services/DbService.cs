@@ -37,6 +37,7 @@ public class DbService
             );
             CREATE UNIQUE INDEX IF NOT EXISTS idx_dev_sha ON recordings(device, sha256);
             CREATE INDEX IF NOT EXISTS idx_recorded_at ON recordings(recorded_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_transcript_status ON recordings(transcript_status);
             """;
         cmd.ExecuteNonQuery();
 

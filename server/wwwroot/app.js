@@ -878,6 +878,10 @@ document.addEventListener("keydown", (e) => {
   audio.onplay = () => { playBtn.textContent = "⏸"; };
   audio.onpause = () => { playBtn.textContent = "▶"; };
   audio.onended = () => { playBtn.textContent = "▶"; $("#dState").textContent = "播放结束"; };
+  audio.onerror = () => {
+    playBtn.textContent = "▶";
+    $("#dState").textContent = "浏览器不支持该音频格式，可在 NAS 上下载后本地播放";
+  };
   audio.ontimeupdate = () => {
     if (audio.duration && isFinite(audio.duration)) {
       $("#dState").textContent = `${fmtSec(audio.currentTime)} / ${fmtSec(audio.duration)}`;

@@ -70,13 +70,21 @@ var lifetime = app.Lifetime;
 lifetime.ApplicationStopping.Register(() => logger.LogInformation("Application stopping…"));
 lifetime.ApplicationStopped.Register(() => logger.LogInformation("Application stopped; SQLite connections released."));
 
-// 鉴权中间件：除 /api/health 外的所有 /api/* 均需 Bearer Token。
-// Authorization 头优先；部分反向代理会剥离该头（如沙箱分享链接），
-// 允许 ?token= 查询参数作为等价凭证（与音频端点同一策略）。
+// 安全响应头：静态页与 API 响应统一附加（不改变功能，防御基础项）
 app.Use(async (ctx, next) =>
 {
-    if (ctx.Request.Path.StartsWithSegments("/api") && ctx.Request.Path != "/api/health"
-        && !ctx.Request.Path.Value!.EndsWith("/file"))
+    ctx.Response.Headers["X-Content-Type-Options"] = "nosniff";
+    ctx.Response.Headers["X-Frame-Options"] = "DENY";
+    ctx.Response.Headers["Referrer-Policy"] = "no-referrer";
+    await next();
+});
+
+// 鉴权中间件：除 /api/health 外的所有 /api/* 均需 Bearer Token。
+// Authorization 头优先；部分反向代理会剥离该头（如沙箱分享链接），
+// 允许 ?token= 查询参数作为等价凭证（音频 <audio> 标签同样携带 ?token= 播放）。
+app.Use(async (ctx, next) =>
+{
+    if (ctx.Request.Path.StartsWithSegments("/api") && ctx.Request.Path != "/api/health")
     {
         var headerOk = auth.Validate(ctx.Request.Headers.Authorization.ToString());
         var queryOk = auth.Validate(ctx.Request.Query["token"].ToString());
@@ -97,12 +105,54 @@ var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
 
 var api = app.MapGroup("/api");
 
-api.MapGet("/health", () => Results.Ok(new
+// 启动时孤儿转写清理：transcripts/{id}.json 无对应录音记录时删除。
+// 历史删除失败或竞态留下的残留文件，占空间且无消费方；现删除链路已级联，此处仅兜底。
+try
 {
-    status = "ok",
-    asr = cfg.Asr.Enabled,
-    version = "1.0.0"
-}));
+    var tDir = Path.Combine(cfg.DataDir, "transcripts");
+    if (Directory.Exists(tDir))
+    {
+        foreach (var f in Directory.EnumerateFiles(tDir, "*.json"))
+        {
+            // 只处理 {id}.json 命名的本服务产物；其余文件不动
+            if (!long.TryParse(Path.GetFileNameWithoutExtension(f), out var tid) || tid <= 0)
+                continue;
+            if (db.GetById(tid) is not null) continue;
+            try
+            {
+                File.Delete(f);
+                logger.LogInformation("Orphan transcript removed: {File}", f);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to remove orphan transcript {File}", f);
+            }
+        }
+    }
+}
+catch (Exception ex) { logger.LogWarning(ex, "Orphan transcript cleanup failed"); }
+
+api.MapGet("/health", () =>
+{
+    // NAS 部署核心水位：磁盘剩余空间、录音数与总占用（供监控与容量规划参考）
+    long diskFree = 0;
+    try
+    {
+        var di = new DriveInfo(Path.GetPathRoot(cfg.DataDir) ?? "/");
+        if (di.IsReady) diskFree = di.AvailableFreeSpace;
+    }
+    catch { /* 磁盘信息不可得时不阻塞健康检查 */ }
+
+    return Results.Ok(new
+    {
+        status = "ok",
+        asr = cfg.Asr.Enabled,
+        version = "1.1.0",
+        diskFreeBytes = diskFree,
+        recordings = db.Count(0, 0, null),
+        totalBytes = db.TotalBytes()
+    });
+});
 
 // 增量同步：客户端上报清单，服务端返回待上传项
 api.MapPost("/sync/diff", (SyncDiffRequest req) =>
@@ -191,6 +241,22 @@ api.MapPost("/upload/complete/{uploadId}", async (string uploadId) =>
     if (missing.Count > 0)
         return Results.BadRequest(new { error = "missing chunks", missing });
 
+    // 分片总大小与声明大小校验：不一致说明分片损坏/重复/截断，拒绝合并入库
+    long totalBytes;
+    try { totalBytes = session.PartPaths.Sum(p => new FileInfo(p).Length); }
+    catch (Exception) { return Results.BadRequest(new { error = "chunk files unreadable" }); }
+    if (totalBytes != session.Size)
+    {
+        logger.LogWarning(
+            "Chunk complete size mismatch {RelPath}: declared={Declared} actual={Actual}",
+            session.RelPath, session.Size, totalBytes);
+        return Results.BadRequest(new
+        {
+            error = "chunk size mismatch (corrupted upload)",
+            expected = session.Size, actual = totalBytes
+        });
+    }
+
     try
     {
         // 零拷贝拼接流直接交给落盘/去重/入库公共逻辑
@@ -251,11 +317,15 @@ api.MapGet("/recordings/{id:long}/file", (HttpContext ctx, long id) =>
     var ext = Path.GetExtension(rec.StoredPath).ToLowerInvariant();
     var contentType = ext switch
     {
-        ".m4a" => "audio/mp4",
+        ".m4a" or ".m4b" => "audio/mp4",
         ".mp3" => "audio/mpeg",
         ".wav" => "audio/wav",
-        ".ogg" => "audio/ogg",
+        ".ogg" or ".oga" or ".opus" => "audio/ogg",
         ".flac" => "audio/flac",
+        ".aac" => "audio/aac",       // 微信/小米录音常见格式，octet-stream 会导致浏览器拒播
+        ".webm" => "audio/webm",
+        ".amr" => "audio/amr",
+        ".3gp" => "audio/3gpp",
         _ => "application/octet-stream"
     };
     return Results.File(rec.StoredPath, contentType,
