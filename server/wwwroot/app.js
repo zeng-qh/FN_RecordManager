@@ -26,7 +26,9 @@ function authHeader() {
 }
 
 async function api(path, opts = {}) {
-  const url = state.server.replace(/\/$/, "") + path;
+  const url = new URL(state.server.replace(/\/$/, "") + path);
+  // 兜底：部分反向代理会剥离 Authorization 头，token 同时放在 query（服务端两处等价校验）
+  if (state.token) url.searchParams.set("token", state.token);
   const res = await fetch(url, {
     ...opts,
     headers: { ...authHeader(), ...(opts.headers || {}) },

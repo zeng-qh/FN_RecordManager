@@ -70,13 +70,17 @@ var lifetime = app.Lifetime;
 lifetime.ApplicationStopping.Register(() => logger.LogInformation("Application stopping…"));
 lifetime.ApplicationStopped.Register(() => logger.LogInformation("Application stopped; SQLite connections released."));
 
-// 鉴权中间件：除 /api/health 外的所有 /api/* 均需 Bearer Token
+// 鉴权中间件：除 /api/health 外的所有 /api/* 均需 Bearer Token。
+// Authorization 头优先；部分反向代理会剥离该头（如沙箱分享链接），
+// 允许 ?token= 查询参数作为等价凭证（与音频端点同一策略）。
 app.Use(async (ctx, next) =>
 {
     if (ctx.Request.Path.StartsWithSegments("/api") && ctx.Request.Path != "/api/health"
         && !ctx.Request.Path.Value!.EndsWith("/file"))
     {
-        if (!auth.Validate(ctx.Request.Headers.Authorization.ToString()))
+        var headerOk = auth.Validate(ctx.Request.Headers.Authorization.ToString());
+        var queryOk = auth.Validate(ctx.Request.Query["token"].ToString());
+        if (!headerOk && !queryOk)
         {
             ctx.Response.StatusCode = 401;
             await ctx.Response.WriteAsJsonAsync(new { error = "unauthorized" });
