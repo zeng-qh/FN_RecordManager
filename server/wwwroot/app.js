@@ -380,10 +380,12 @@ async function triggerTranscribe(id) {
   } catch (e) {}
 }
 
-// ---- 网页端上传（弹层 + 4MB 分片 + 断点续传）----
+// ---- 网页端上传（弹层 + 1MB 分片 + 断点续传）----
 // uploadId 由服务端按 (device|relPath|size|mtime) 派生：同一文件中断后重新
 // 上传时 init 返回已收分片，只补缺失部分——刷新页面也不丢进度。
-const CHUNK_SIZE = 4 * 1024 * 1024;
+// 1MB 分片：公网/弱网上行（~100KB/s）也能在反向代理连接超时（通常 30s）内
+// 传完单片，避免分片反复被掐断导致"卡住"的观感；局域网下效率影响可忽略。
+const CHUNK_SIZE = 1024 * 1024;
 
 function openUpload() {
   $("#uploadModal").hidden = false;
@@ -499,17 +501,22 @@ async function runUploadItem(item) {
 
 async function putChunkWithRetry(uploadId, index, blob, retries = 3) {
   for (let attempt = 0; ; attempt++) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 60000); // 单片硬超时：弱网下不无限挂起
     try {
       const res = await api(`/api/upload/chunk/${uploadId}/${index}`, {
         method: "PUT",
         headers: { "Content-Type": "application/octet-stream" },
         body: blob,
+        signal: ac.signal,
       });
       if (!res.ok) throw new Error("chunk HTTP " + res.status);
       return await res.json();
     } catch (err) {
       if (attempt >= retries) throw err;
       await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt)); // 指数退避 1s/2s/4s
+    } finally {
+      clearTimeout(timer);
     }
   }
 }

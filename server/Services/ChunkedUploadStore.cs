@@ -112,6 +112,7 @@ public class ChunkedUploadStore
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             try { if (File.Exists(tmp)) File.Delete(tmp); } catch { /* 尽力清理 */ }
+            _logger.LogWarning(ex, "Failed to write chunk {UploadId}/{Index} (client disconnected or disk error)", id, index);
             return "failed to write chunk: " + ex.Message;
         }
     }
