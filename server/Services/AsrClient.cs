@@ -39,6 +39,29 @@ public class AsrClient(HttpClient http, VaultConfig cfg)
         (string.IsNullOrWhiteSpace(cfg.Asr.Endpoint) ? "http://localhost:8000" : cfg.Asr.Endpoint).TrimEnd('/');
 
     /// <summary>
+    /// 探测边车是否在线（GET /health，2 秒超时）。
+    /// 供转写队列在边车重启/被回收期间挂起等待，避免把任务误判为失败。
+    /// </summary>
+    public async Task<bool> IsHealthyAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(2));
+            using var resp = await http.GetAsync(BaseEndpoint + "/health", cts.Token);
+            return resp.IsSuccessStatusCode;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw; // 队列停机等真实取消向上传播
+        }
+        catch
+        {
+            return false; // 连接拒绝/超时 = 边车不在线
+        }
+    }
+
+    /// <summary>
     /// 提交异步转写任务并轮询至完成。
     /// <paramref name="taskId"/> 用录音 id（同任务重复提交即重启）；
     /// <paramref name="onProgress"/> 每次轮询回调（progress 0-100，partial 已转文本）。

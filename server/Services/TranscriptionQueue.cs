@@ -46,6 +46,9 @@ public class TranscriptionQueue : BackgroundService
             {
                 try
                 {
+                    // 边车离线（重启/被回收）时挂起等待而非判失败：
+                    // 否则排队任务会在几十毫秒内连续 Connection refused 全灭
+                    await WaitForSidecarAsync(_cts.Token);
                     await TranscribeAsync(id, _cts.Token);
                 }
                 catch (OperationCanceledException) when (_cts.IsCancellationRequested)
@@ -77,6 +80,27 @@ public class TranscriptionQueue : BackgroundService
         _channel.Writer.TryComplete();
         _cts.Cancel();
         await base.StopAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// 等待边车就绪：在线则立即返回；离线则每 5 秒探测一次，
+    /// 最长等 15 分钟（超时抛异常走正常失败流程，闲时窗口内仍会自动重试）。
+    /// 典型场景：边车容器重启（数十秒）、NAS 重启后服务先起边车后起。
+    /// </summary>
+    private async Task WaitForSidecarAsync(CancellationToken ct)
+    {
+        if (await _asr.IsHealthyAsync(ct)) return;
+
+        _logger.LogWarning("ASR sidecar offline — transcription queue paused, waiting for recovery…");
+        var deadline = DateTime.UtcNow.AddMinutes(15);
+        while (!await _asr.IsHealthyAsync(ct))
+        {
+            if (DateTime.UtcNow > deadline)
+                throw new TimeoutException("ASR sidecar offline for over 15 minutes");
+            try { await Task.Delay(TimeSpan.FromSeconds(5), ct); }
+            catch (OperationCanceledException) when (_cts.IsCancellationRequested) { throw; }
+        }
+        _logger.LogInformation("ASR sidecar back online — transcription queue resumed");
     }
 
     /// <summary>执行单条转写并把结果写入磁盘与元数据。</summary>
