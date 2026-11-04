@@ -15,6 +15,7 @@ const state = {
   month: "",     // 月份筛选（2026-11）
   selectMode: false,      // 多选管理模式
   selected: new Set(),    // 选中的录音 id
+  selectedBytes: new Map(), // 选中录音 id → 字节大小（批量栏显示总大小用）
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -186,6 +187,7 @@ function statusBadge(it) {
 function renderItem(it) {
   const item = el("div", "item");
   item.dataset.id = it.id;
+  item.dataset.size = it.size; // 批量「全选」时累计已选大小用
   if (state.selectMode && state.selected.has(it.id)) item.classList.add("selected");
 
   const play = el("button", "play", "▶");
@@ -207,6 +209,20 @@ function renderItem(it) {
     const chk = el("input", "pick");
     chk.type = "checkbox";
     chk.checked = state.selected.has(it.id);
+    // 勾选框自身走原生 change 事件同步状态：
+    // 之前靠卡片 click + preventDefault 处理，浏览器的「取消默认行为后
+    // 恢复勾选状态」会覆盖手动同步，导致勾了没反应（时好时坏）
+    chk.onchange = () => {
+      if (chk.checked) {
+        state.selected.add(it.id);
+        state.selectedBytes.set(it.id, it.size);
+      } else {
+        state.selected.delete(it.id);
+        state.selectedBytes.delete(it.id);
+      }
+      item.classList.toggle("selected", chk.checked);
+      syncBatchBar();
+    };
     ops.appendChild(chk);
   } else {
     if (state.asrEnabled) {
@@ -220,12 +236,11 @@ function renderItem(it) {
   }
 
   item.append(play, meta, badge, ops);
-  // 点击条目：多选模式切换选中；普通模式打开详情（按钮区除外）
+  // 点击条目：多选模式切换选中；普通模式打开详情（按钮/勾选框区除外）
   item.addEventListener("click", (e) => {
-    if (e.target.closest("button") && !state.selectMode) return;
+    if (e.target.closest("button") || e.target.closest("input.pick")) return;
     if (state.selectMode) {
-      e.preventDefault();
-      toggleSelect(it.id);
+      toggleSelect(it.id, item, it.size);
     } else {
       openDetail(it.id);
     }
@@ -234,27 +249,38 @@ function renderItem(it) {
 }
 
 // ---- 多选管理（批量删除 / 打包导出）----
-function toggleSelect(id) {
-  if (state.selected.has(id)) state.selected.delete(id);
-  else state.selected.add(id);
+// 点击卡片空白处切换选中：只更新当前卡片，不做全列表遍历（列表长时也即时响应）
+function toggleSelect(id, itemEl, size) {
+  if (state.selected.has(id)) {
+    state.selected.delete(id);
+    state.selectedBytes.delete(id);
+  } else {
+    state.selected.add(id);
+    state.selectedBytes.set(id, size || 0);
+  }
+  if (itemEl) {
+    const on = state.selected.has(id);
+    itemEl.classList.toggle("selected", on);
+    const chk = itemEl.querySelector("input.pick");
+    if (chk) chk.checked = on;
+  }
   syncBatchBar();
-  document.querySelectorAll(".item").forEach((n) => {
-    n.classList.toggle("selected", state.selected.has(Number(n.dataset.id)));
-    const chk = n.querySelector("input.pick");
-    if (chk) chk.checked = state.selected.has(Number(n.dataset.id));
-  });
 }
 
 function syncBatchBar() {
   const bar = $("#batchBar");
   bar.hidden = !state.selectMode;
-  $("#batchCount").textContent = `已选 ${state.selected.size} 条`;
+  let bytes = 0;
+  for (const b of state.selectedBytes.values()) bytes += b;
+  $("#batchCount").textContent =
+    `已选 ${state.selected.size} 条 · ${fmtSize(bytes)}`;
   $("#manageBtn").classList.toggle("active", state.selectMode);
 }
 
 function setSelectMode(on) {
   state.selectMode = on;
   state.selected.clear();
+  state.selectedBytes.clear();
   syncBatchBar();
   loadRecordings(true); // 重绘列表以切换复选框/操作按钮形态
 }
@@ -1009,8 +1035,11 @@ $("#batchCancel").onclick = () => setSelectMode(false);
 $("#batchDelete").onclick = batchDelete;
 $("#batchExport").onclick = batchExport;
 $("#batchAll").onclick = () => {
-  document.querySelectorAll(".item").forEach((n) => state.selected.add(Number(n.dataset.id)));
+  // 一次遍历完成：记录选中、勾选框状态、已选大小累计
   document.querySelectorAll(".item").forEach((n) => {
+    const id = Number(n.dataset.id);
+    state.selected.add(id);
+    state.selectedBytes.set(id, Number(n.dataset.size) || 0);
     n.classList.add("selected");
     const chk = n.querySelector("input.pick");
     if (chk) chk.checked = true;
