@@ -228,7 +228,8 @@ api.MapPost("/upload/init", (UploadInitRequest req) =>
 
 api.MapPut("/upload/chunk/{uploadId}/{index:long}", async (HttpContext ctx, string uploadId, long index) =>
 {
-    var err = await chunks.WriteChunkAsync(uploadId, index, ctx.Request.Body, ctx.RequestAborted);
+    var err = await chunks.WriteChunkAsync(
+        uploadId, index, ctx.Request.Body, ctx.Request.ContentLength, ctx.RequestAborted);
     if (err is not null) return Results.BadRequest(new { error = err });
     return Results.Ok(new { index, done = true });
 });
