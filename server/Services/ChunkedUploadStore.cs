@@ -84,8 +84,12 @@ public class ChunkedUploadStore
         return (id, received);
     }
 
-    /// <summary>写入一个分片（临时文件 + rename 原子落盘，重传幂等）。失败返回错误消息，成功返回 null。</summary>
-    public async Task<string?> WriteChunkAsync(string uploadId, long index, Stream body, CancellationToken ct = default)
+    /// <summary>
+    /// 写入一个分片（临时文件 + rename 原子落盘，重传幂等）。失败返回错误消息，成功返回 null。
+    /// 临时文件带唯一后缀：同一分片被并发重传时互不覆盖（前端异常重试场景）。
+    /// </summary>
+    public async Task<string?> WriteChunkAsync(string uploadId, long index, Stream body,
+        long? contentLength = null, CancellationToken ct = default)
     {
         var id = SanitizeId(uploadId);
         if (id.Length == 0) return "invalid uploadId";
@@ -94,9 +98,13 @@ public class ChunkedUploadStore
         if (meta is null) return "session not found (init first)";
         if (index < 0 || index >= meta.TotalChunks)
             return $"index out of range (0..{meta.TotalChunks - 1})";
+        // 单分片体积上限：正常分片 ≤ ChunkSize，留 2 倍余量容忍协议开销；
+        // 超限说明客户端异常（或滥用），尽早拒绝避免占满磁盘
+        if (contentLength is > 0 && contentLength > (long)meta.ChunkSize * 2)
+            return $"chunk too large ({contentLength} > {meta.ChunkSize * 2})";
 
         var dir = SessionDir(id);
-        var tmp = Path.Combine(dir, $"{index}.part.tmp");
+        var tmp = Path.Combine(dir, $"{index}.{Guid.NewGuid():N}.part.tmp");
         var target = PartPath(id, index);
 
         try
@@ -153,14 +161,22 @@ public class ChunkedUploadStore
         {
             foreach (var dir in Directory.EnumerateDirectories(_root))
             {
-                var metaPath = Path.Combine(dir, "meta.json");
-                DateTime created;
-                try { created = File.GetLastWriteTimeUtc(metaPath); }
-                catch { continue; }
-                if (DateTime.UtcNow - created > SessionTtl)
+                // 单个会话清理失败不中断整体（并发写入中的会话可能暂时删不掉）
+                try
                 {
-                    Directory.Delete(dir, recursive: true);
-                    _logger.LogInformation("Expired chunk session removed: {Dir}", dir);
+                    var metaPath = Path.Combine(dir, "meta.json");
+                    DateTime created;
+                    try { created = File.GetLastWriteTimeUtc(metaPath); }
+                    catch { continue; }
+                    if (DateTime.UtcNow - created > SessionTtl)
+                    {
+                        Directory.Delete(dir, recursive: true);
+                        _logger.LogInformation("Expired chunk session removed: {Dir}", dir);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to remove expired session {Dir}", dir);
                 }
             }
         }

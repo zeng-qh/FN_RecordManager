@@ -1,3 +1,6 @@
+using System.Security.Cryptography;
+using System.Text;
+
 namespace VoiceVault.Server.Services;
 
 /// <summary>
@@ -6,21 +9,28 @@ namespace VoiceVault.Server.Services;
 public class AuthService
 {
     private readonly string _token;
+    private readonly byte[] _tokenBytes;
 
     public AuthService(string token)
     {
         _token = token;
+        _tokenBytes = Encoding.UTF8.GetBytes(token);
     }
 
-    public bool Validate(string? authorizationHeader)
+    public bool Validate(string? token)
     {
-        if (string.IsNullOrWhiteSpace(authorizationHeader))
+        if (string.IsNullOrWhiteSpace(token))
             return false;
 
-        var header = authorizationHeader!;
-        if (header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
-            header = header["Bearer ".Length..].Trim();
+        if (token.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+            token = token["Bearer ".Length..].Trim();
 
-        return !string.IsNullOrWhiteSpace(header) && header == _token;
+        if (string.IsNullOrWhiteSpace(token))
+            return false;
+
+        // 恒定时间比较：无论 token 是否命中、在第几位不同，耗时一致，
+        // 避免逐字节提前短路造成的时序侧信道。
+        var candidate = Encoding.UTF8.GetBytes(token);
+        return CryptographicOperations.FixedTimeEquals(candidate, _tokenBytes);
     }
 }

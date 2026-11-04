@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Data.Sqlite;
+using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -70,13 +71,21 @@ var lifetime = app.Lifetime;
 lifetime.ApplicationStopping.Register(() => logger.LogInformation("Application stopping…"));
 lifetime.ApplicationStopped.Register(() => logger.LogInformation("Application stopped; SQLite connections released."));
 
-// 鉴权中间件：除 /api/health 外的所有 /api/* 均需 Bearer Token。
-// Authorization 头优先；部分反向代理会剥离该头（如沙箱分享链接），
-// 允许 ?token= 查询参数作为等价凭证（与音频端点同一策略）。
+// 安全响应头：静态页与 API 响应统一附加（不改变功能，防御基础项）
 app.Use(async (ctx, next) =>
 {
-    if (ctx.Request.Path.StartsWithSegments("/api") && ctx.Request.Path != "/api/health"
-        && !ctx.Request.Path.Value!.EndsWith("/file"))
+    ctx.Response.Headers["X-Content-Type-Options"] = "nosniff";
+    ctx.Response.Headers["X-Frame-Options"] = "DENY";
+    ctx.Response.Headers["Referrer-Policy"] = "no-referrer";
+    await next();
+});
+
+// 鉴权中间件：除 /api/health 外的所有 /api/* 均需 Bearer Token。
+// Authorization 头优先；部分反向代理会剥离该头（如沙箱分享链接），
+// 允许 ?token= 查询参数作为等价凭证（音频 <audio> 标签同样携带 ?token= 播放）。
+app.Use(async (ctx, next) =>
+{
+    if (ctx.Request.Path.StartsWithSegments("/api") && ctx.Request.Path != "/api/health")
     {
         var headerOk = auth.Validate(ctx.Request.Headers.Authorization.ToString());
         var queryOk = auth.Validate(ctx.Request.Query["token"].ToString());
@@ -97,12 +106,54 @@ var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
 
 var api = app.MapGroup("/api");
 
-api.MapGet("/health", () => Results.Ok(new
+// 启动时孤儿转写清理：transcripts/{id}.json 无对应录音记录时删除。
+// 历史删除失败或竞态留下的残留文件，占空间且无消费方；现删除链路已级联，此处仅兜底。
+try
 {
-    status = "ok",
-    asr = cfg.Asr.Enabled,
-    version = "1.0.0"
-}));
+    var tDir = Path.Combine(cfg.DataDir, "transcripts");
+    if (Directory.Exists(tDir))
+    {
+        foreach (var f in Directory.EnumerateFiles(tDir, "*.json"))
+        {
+            // 只处理 {id}.json 命名的本服务产物；其余文件不动
+            if (!long.TryParse(Path.GetFileNameWithoutExtension(f), out var tid) || tid <= 0)
+                continue;
+            if (db.GetById(tid) is not null) continue;
+            try
+            {
+                File.Delete(f);
+                logger.LogInformation("Orphan transcript removed: {File}", f);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to remove orphan transcript {File}", f);
+            }
+        }
+    }
+}
+catch (Exception ex) { logger.LogWarning(ex, "Orphan transcript cleanup failed"); }
+
+api.MapGet("/health", () =>
+{
+    // NAS 部署核心水位：磁盘剩余空间、录音数与总占用（供监控与容量规划参考）
+    long diskFree = 0;
+    try
+    {
+        var di = new DriveInfo(Path.GetPathRoot(cfg.DataDir) ?? "/");
+        if (di.IsReady) diskFree = di.AvailableFreeSpace;
+    }
+    catch { /* 磁盘信息不可得时不阻塞健康检查 */ }
+
+    return Results.Ok(new
+    {
+        status = "ok",
+        asr = cfg.Asr.Enabled,
+        version = "1.1.0",
+        diskFreeBytes = diskFree,
+        recordings = db.Count(0, 0, null),
+        totalBytes = db.TotalBytes()
+    });
+});
 
 // 增量同步：客户端上报清单，服务端返回待上传项
 api.MapPost("/sync/diff", (SyncDiffRequest req) =>
@@ -178,7 +229,8 @@ api.MapPost("/upload/init", (UploadInitRequest req) =>
 
 api.MapPut("/upload/chunk/{uploadId}/{index:long}", async (HttpContext ctx, string uploadId, long index) =>
 {
-    var err = await chunks.WriteChunkAsync(uploadId, index, ctx.Request.Body, ctx.RequestAborted);
+    var err = await chunks.WriteChunkAsync(
+        uploadId, index, ctx.Request.Body, ctx.Request.ContentLength, ctx.RequestAborted);
     if (err is not null) return Results.BadRequest(new { error = err });
     return Results.Ok(new { index, done = true });
 });
@@ -190,6 +242,22 @@ api.MapPost("/upload/complete/{uploadId}", async (string uploadId) =>
         return Results.NotFound(new { error = "session not found" });
     if (missing.Count > 0)
         return Results.BadRequest(new { error = "missing chunks", missing });
+
+    // 分片总大小与声明大小校验：不一致说明分片损坏/重复/截断，拒绝合并入库
+    long totalBytes;
+    try { totalBytes = session.PartPaths.Sum(p => new FileInfo(p).Length); }
+    catch (Exception) { return Results.BadRequest(new { error = "chunk files unreadable" }); }
+    if (totalBytes != session.Size)
+    {
+        logger.LogWarning(
+            "Chunk complete size mismatch {RelPath}: declared={Declared} actual={Actual}",
+            session.RelPath, session.Size, totalBytes);
+        return Results.BadRequest(new
+        {
+            error = "chunk size mismatch (corrupted upload)",
+            expected = session.Size, actual = totalBytes
+        });
+    }
 
     try
     {
@@ -210,6 +278,19 @@ api.MapPost("/upload/complete/{uploadId}", async (string uploadId) =>
         logger.LogError(ex, "Chunked upload complete failed: {RelPath}", session.RelPath);
         return Results.Problem(ex.Message);
     }
+});
+
+// 全库聚合统计（前端顶部统计条）
+api.MapGet("/stats", () =>
+{
+    var (count, bytes, dur, transcribed) = db.GetStats();
+    return Results.Ok(new
+    {
+        count,
+        totalBytes = bytes,
+        totalDurationSec = dur,
+        transcribed
+    });
 });
 
 // 录音列表（分页 + 时间范围 + 关键词）
@@ -251,11 +332,15 @@ api.MapGet("/recordings/{id:long}/file", (HttpContext ctx, long id) =>
     var ext = Path.GetExtension(rec.StoredPath).ToLowerInvariant();
     var contentType = ext switch
     {
-        ".m4a" => "audio/mp4",
+        ".m4a" or ".m4b" => "audio/mp4",
         ".mp3" => "audio/mpeg",
         ".wav" => "audio/wav",
-        ".ogg" => "audio/ogg",
+        ".ogg" or ".oga" or ".opus" => "audio/ogg",
         ".flac" => "audio/flac",
+        ".aac" => "audio/aac",       // 微信/小米录音常见格式，octet-stream 会导致浏览器拒播
+        ".webm" => "audio/webm",
+        ".amr" => "audio/amr",
+        ".3gp" => "audio/3gpp",
         _ => "application/octet-stream"
     };
     return Results.File(rec.StoredPath, contentType,
@@ -358,6 +443,65 @@ api.MapDelete("/recordings/{id:long}", (long id) =>
     }
     logger.LogInformation("Deleted recording id={Id} relPath={RelPath}", id, rec.RelPath);
     return Results.Ok(new { deleted = id });
+});
+
+// 批量删除：网页端多选模式一次删除多条（逐条走同一清理逻辑，幂等）
+api.MapPost("/recordings/batch-delete", (List<long> ids) =>
+{
+    var deleted = 0;
+    var notFound = new List<long>();
+    foreach (var id in ids.Distinct().Take(1000))
+    {
+        var rec = db.DeleteById(id);
+        if (rec is null) { notFound.Add(id); continue; }
+        foreach (var p in new[] { rec.StoredPath, rec.TranscriptPath })
+        {
+            if (string.IsNullOrWhiteSpace(p) || !File.Exists(p)) continue;
+            try { File.Delete(p); }
+            catch (Exception ex) { logger.LogWarning(ex, "Batch delete: failed to remove {Path}", p); }
+        }
+        deleted++;
+    }
+    logger.LogInformation("Batch deleted {Count} recordings, {Missing} not found", deleted, notFound.Count);
+    return Results.Ok(new { deleted, notFound });
+});
+
+// 批量打包导出：ids 逗号分隔，流式 ZIP 直写响应（音频已压缩，NoCompression 省时省 CPU）
+api.MapGet("/recordings/export/zip", async (HttpContext ctx, string? ids) =>
+{
+    var idList = (ids ?? "")
+        .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Select(s => long.TryParse(s, out var i) ? i : 0)
+        .Where(i => i > 0).Distinct().Take(500).ToList();
+    if (idList.Count == 0)
+        return Results.BadRequest(new { error = "ids required, e.g. ?ids=1,2,3" });
+
+    var recs = idList.Select(db.GetById)
+        .Where(r => r is not null && File.Exists(r!.StoredPath))
+        .Select(r => r!)
+        .ToList();
+    if (recs.Count == 0)
+        return Results.NotFound(new { error = "no recordings available" });
+
+    logger.LogInformation("Exporting {Count} recordings as zip", recs.Count);
+    ctx.Response.ContentType = "application/zip";
+    ctx.Response.Headers.ContentDisposition =
+        $"attachment; filename=voicevault-{DateTime.Now:yyyyMMdd-HHmmss}.zip";
+
+    // BodyWriter.AsStream：其同步写内部转 FlushAsync，绕开 Kestrel 禁同步 IO 限制
+    // （ZipArchive Dispose 写 central directory 是同步 Write，直接用 Response.Body 会抛异常）
+    // entry 名加 id 前缀：天然去重，避免同名文件在 zip 内冲突
+    await using var zip = new ZipArchive(
+        ctx.Response.BodyWriter.AsStream(leaveOpen: true), ZipArchiveMode.Create, leaveOpen: true);
+    foreach (var rec in recs)
+    {
+        var entry = zip.CreateEntry($"{rec.Id}_{rec.FileName}", CompressionLevel.NoCompression);
+        await using var es = entry.Open();
+        await using var fs = File.OpenRead(rec.StoredPath);
+        await fs.CopyToAsync(es, ctx.RequestAborted);
+    }
+    await zip.DisposeAsync(); // 显式落 central directory / EOCD 后再结束响应
+    return Results.Empty;
 });
 
 // 设置（ASR / 转写时机 / 保留策略，持久化到 settings.json）

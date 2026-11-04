@@ -17,11 +17,21 @@
     </div>
     <div class="actions">
       <input id="search" type="search" placeholder="搜索文件名 / 标题…" />
+      <button id="manageBtn" title="多选管理">☑️</button>
       <button id="uploadBtn" title="上传录音">⬆️</button>
       <button id="refresh" title="刷新">🔄</button>
       <button id="settingsBtn" title="设置">⚙️</button>
     </div>
   </header>
+
+  <!-- 多选模式浮动操作栏 -->
+  <div id="batchBar" class="batch-bar" hidden>
+    <span id="batchCount">已选 0 条</span>
+    <button id="batchAll">全选</button>
+    <button id="batchExport" title="打包下载选中的录音">📦 导出ZIP</button>
+    <button id="batchDelete" class="danger">🗑 删除</button>
+    <button id="batchCancel">取消</button>
+  </div>
 
   <main>
     <div id="status" class="status"></div>
@@ -43,7 +53,7 @@
           <small>支持多选 · 断网 / 中断后自动从断点续传，无需重传整个文件</small>
         </div>
         <input id="uploadInput" type="file" multiple hidden
-               accept="audio/*,.m4a,.mp3,.wav,.amr,.aac,.ogg,.flac" />
+               accept="audio/*,.m4a,.mp3,.wav,.amr,.aac,.ogg,.oga,.flac,.opus,.webm,.3gp" />
       </div>
       <div id="uploadQueue" class="upload-queue"></div>
       <div class="modal-actions">
@@ -56,6 +66,7 @@
   <div id="settingsModal" class="modal" hidden>
     <div class="modal-card">
       <h2>设置</h2>
+      <div id="srvStatus" class="srv-status">服务器状态加载中…</div>
       <label>服务器地址
         <input id="cfgServer" type="text" placeholder="http://192.168.1.10:8080" />
       </label>
