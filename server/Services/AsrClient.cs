@@ -34,7 +34,10 @@ public class AsrClient(HttpClient http, VaultConfig cfg)
         content.Add(new StringContent(cfg.Asr.Model), "model");
         content.Add(new StringContent(cfg.Asr.SpeakerDiarization.ToString()), "diarize");
 
-        var endpoint = cfg.Asr.Endpoint.TrimEnd('/') + "/transcribe";
+        // Endpoint 未配置时回退到默认地址，避免拼出 "/transcribe" 这类非法 URL 静默失败
+        var endpoint = (string.IsNullOrWhiteSpace(cfg.Asr.Endpoint)
+            ? "http://localhost:8000"
+            : cfg.Asr.Endpoint).TrimEnd('/') + "/transcribe";
         using var resp = await http.PostAsync(endpoint, content, ct);
         resp.EnsureSuccessStatusCode();
         var json = await resp.Content.ReadAsStringAsync(ct);
