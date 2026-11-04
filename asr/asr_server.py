@@ -40,8 +40,25 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 _model_cache = {}
 _s2t_converter = None
-_jobs: dict = {}  # task_id -> {status, progress, partial, language, segments, text, error}
+# task_id -> {status, progress, partial, language, segments, text, error, finished_at}
+_jobs: dict = {}
 _jobs_lock = threading.Lock()
+JOB_TTL_SEC = 600  # 完成后保留 10 分钟供补拉，过期由清理线程回收
+
+
+def _janitor():
+    """后台清理线程：定期回收过期任务，避免 _jobs 无界增长。"""
+    while True:
+        time.sleep(60)
+        cutoff = time.time() - JOB_TTL_SEC
+        with _jobs_lock:
+            expired = [k for k, v in _jobs.items()
+                       if v.get("finished_at") and v["finished_at"] < cutoff]
+            for k in expired:
+                _jobs.pop(k, None)
+
+
+threading.Thread(target=_janitor, daemon=True).start()
 
 
 def to_simplified(text: str) -> str:
@@ -142,10 +159,9 @@ def _run_job(task_id: str, tmp_path: str, model_size: str, diarize: bool):
             os.remove(tmp_path)
         except OSError:
             pass
-        # 任务结果保留 10 分钟供补拉，过期清理
-        time.sleep(600)
         with _jobs_lock:
-            _jobs.pop(task_id, None)
+            if task_id in _jobs:
+                _jobs[task_id]["finished_at"] = time.time()  # 交由清理线程按 TTL 回收
 
 
 @app.post("/transcribe")

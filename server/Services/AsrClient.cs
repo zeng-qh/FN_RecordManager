@@ -31,6 +31,9 @@ public class AsrClient(HttpClient http, VaultConfig cfg)
         string? Status, double Progress, string? Partial,
         string? Language, List<AsrSegment>? Segments, string? Text, string? Error);
 
+    // 轮询每秒反序列化一次：选项静态缓存，避免重复构建
+    private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web);
+
     /// <summary>Endpoint 未配置时回退到默认地址，避免拼出非法 URL 静默失败。</summary>
     private string BaseEndpoint =>
         (string.IsNullOrWhiteSpace(cfg.Asr.Endpoint) ? "http://localhost:8000" : cfg.Asr.Endpoint).TrimEnd('/');
@@ -59,14 +62,13 @@ public class AsrClient(HttpClient http, VaultConfig cfg)
         }
 
         // 轮询：1s 间隔，直到 done / error
-        var jsonOpts = new JsonSerializerOptions(JsonSerializerDefaults.Web);
         while (true)
         {
             ct.ThrowIfCancellationRequested();
             await Task.Delay(1000, ct);
 
             var status = await http.GetFromJsonAsync<JobStatus>(
-                $"{BaseEndpoint}/transcribe-status/{taskId}", jsonOpts, ct);
+                $"{BaseEndpoint}/transcribe-status/{taskId}", JsonOpts, ct);
             if (status is null)
                 throw new InvalidOperationException("asr status empty");
 
