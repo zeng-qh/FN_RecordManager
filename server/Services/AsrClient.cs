@@ -17,6 +17,15 @@ public class AsrResult
     public string? Text { get; set; }
     public List<AsrSegment>? Segments { get; set; }
     public string? Language { get; set; }
+
+    /// <summary>
+    /// 音频容器真实时长（秒，含尾部静音）。空/0 表示边车未能读取，
+    /// 调用方回退为「最后一段语音的结束时间」。
+    /// </summary>
+    public double? Duration { get; set; }
+
+    /// <summary>有声音时长（秒，VAD 过滤静音后的语音时长）。空/0 表示边车未返回。</summary>
+    public double? Speech { get; set; }
 }
 
 /// <summary>
@@ -29,7 +38,8 @@ public class AsrClient(HttpClient http, VaultConfig cfg)
     /// <summary>边车 /transcribe-status 返回的任务状态。</summary>
     private record JobStatus(
         string? Status, double Progress, string? Partial,
-        string? Language, List<AsrSegment>? Segments, string? Text, string? Error);
+        string? Language, List<AsrSegment>? Segments, string? Text,
+        double? Duration, double? Speech, string? Error);
 
     // 轮询每秒反序列化一次：选项静态缓存，避免重复构建
     private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web);
@@ -104,6 +114,8 @@ public class AsrClient(HttpClient http, VaultConfig cfg)
                     Text = status.Text,
                     Segments = status.Segments,
                     Language = status.Language,
+                    Duration = status.Duration,
+                    Speech = status.Speech,
                 };
 
             onProgress?.Invoke(status.Progress, status.Partial ?? "");

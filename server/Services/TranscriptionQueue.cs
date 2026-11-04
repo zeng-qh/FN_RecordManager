@@ -149,19 +149,28 @@ public class TranscriptionQueue : BackgroundService
             var tPath = Path.Combine(tDir, $"{id}.json");
             await File.WriteAllTextAsync(tPath, JsonSerializer.Serialize(result, _json), ct);
 
-            // 全文与时长落库：全文供关键词检索（列 transcript_text），时长取末段 end（秒）
+            // 全文与双时长落库：全文供关键词检索（列 transcript_text）。
+            // 总时长 = 音频容器真实时长（含尾部静音）；有声音时长 = VAD 过滤后语音时长。
+            // 边车未返回容器时长时回退「最后一段语音的结束时间」（尾部静音长的录音会偏短）。
             var plainText = !string.IsNullOrWhiteSpace(result.Text)
                 ? result.Text!
                 : string.Join("\n", (result.Segments ?? []).Select(s => s.Text ?? ""));
-            var durationSec = (result.Segments is { Count: > 0 }) ? result.Segments[^1].End : 0;
+            var durationSec = (result.Duration is > 0)
+                ? result.Duration.Value
+                : (result.Segments is { Count: > 0 }) ? result.Segments[^1].End : 0;
+            // 有声音时长：边车返回 VAD 后语音时长；缺省回退末段 end（旧边车近似）
+            var speechSec = (result.Speech is > 0)
+                ? result.Speech
+                : (result.Segments is { Count: > 0 }) ? result.Segments[^1].End : null;
             if (plainText.Length > 0 || durationSec > 0)
-                _db.SaveTranscriptResult(id, plainText, durationSec);
+                _db.SaveTranscriptResult(id, plainText, durationSec, speechSec);
 
             _db.UpdateTranscript(id, tPath, "done", result.Language, attemptsDelta: -1_000_000); // 成功清零重试计数
-            _logger.LogInformation("Transcribed id={Id} lang={Lang} segments={Seg} duration={Dur:F1}s elapsed={Elapsed:F1}s",
-                id, result.Language, result.Segments?.Count ?? 0, durationSec, sw.Elapsed.TotalSeconds);
+            _logger.LogInformation("Transcribed id={Id} lang={Lang} segments={Seg} duration={Dur:F1}s speech={Sp:F1}s elapsed={Elapsed:F1}s",
+                id, result.Language, result.Segments?.Count ?? 0, durationSec, speechSec ?? 0, sw.Elapsed.TotalSeconds);
 
-            AdaptSpeedFactor(durationSec, sw.Elapsed.TotalSeconds);
+            // 速度因子按「有声音时长」计算（转写耗时正比于语音量，静音不参与推理）
+            AdaptSpeedFactor(speechSec ?? durationSec, sw.Elapsed.TotalSeconds);
         }
         finally
         {

@@ -64,6 +64,7 @@ public class DbService
             "ALTER TABLE recordings ADD COLUMN no_transcribe INTEGER NOT NULL DEFAULT 0", // 「默认不转写」标记（批量转写跳过）
             "ALTER TABLE recordings ADD COLUMN transcribe_ms INTEGER",          // 最近一次转写实际耗时（毫秒）
             "ALTER TABLE recordings ADD COLUMN transcribe_started_at INTEGER",  // 最近一次转写开始时间（Unix 秒）
+            "ALTER TABLE recordings ADD COLUMN speech_sec REAL",                // 有声音时长（VAD 过滤静音后的语音时长）
             // 依赖新增列的索引必须在加列之后创建
             "CREATE INDEX IF NOT EXISTS idx_contact ON recordings(contact)",
             "CREATE INDEX IF NOT EXISTS idx_no_transcribe ON recordings(no_transcribe)",
@@ -220,7 +221,7 @@ public class DbService
     /// </summary>
     private const string ListColumns =
         "id, device, rel_path, file_name, stored_path, size, mtime, sha256, title, recorded_at, " +
-        "transcript_status, transcript_path, language, duration_sec, transcript_attempts, " +
+        "transcript_status, transcript_path, language, duration_sec, speech_sec, transcript_attempts, " +
         "transcript_progress, transcript_partial, note, contact, contact_kind, created_at, " +
         "no_transcribe, transcribe_ms, transcribe_started_at";
 
@@ -357,7 +358,8 @@ public class DbService
               SUM(CASE WHEN transcript_status='done' THEN 1 ELSE 0 END),
               SUM(CASE WHEN transcript_status='error' AND COALESCE(no_transcribe,0)=0 THEN 1 ELSE 0 END),
               SUM(CASE WHEN COALESCE(no_transcribe,0)=1 THEN 1 ELSE 0 END),
-              COALESCE(SUM(CASE WHEN COALESCE(no_transcribe,0)=0 AND (transcript_status IS NULL OR transcript_status IN ('none','idle','error')) THEN duration_sec END), 0)
+              -- 估算预计耗时按「有声音时长」累计（转写耗时正比于语音量，不含静音）
+              COALESCE(SUM(CASE WHEN COALESCE(no_transcribe,0)=0 AND (transcript_status IS NULL OR transcript_status IN ('none','idle','error')) THEN COALESCE(speech_sec, duration_sec) END), 0)
             FROM recordings
             """;
         using var r = cmd.ExecuteReader();
@@ -371,7 +373,10 @@ public class DbService
             r.IsDBNull(5) ? 0 : r.GetDouble(5));
     }
 
-    /// <summary>批量回填录音时长（秒）。前端经 audio 元数据读出后写回，供转写估算与列表展示。</summary>
+    /// <summary>
+    /// 批量回填/校正录音总时长（秒）：填空缺值，或与已有值偏差超过 10 秒时
+    /// 以探测到的容器真实时长为准更新（旧版时长取末段 end，尾部静音长会偏短）。
+    /// </summary>
     public int SetDurations(List<(long Id, double DurationSec)> list)
     {
         using var c = OpenConn();
@@ -381,7 +386,7 @@ public class DbService
         cmd.Transaction = tx;
         cmd.CommandText = """
             UPDATE recordings SET duration_sec=@d
-            WHERE id=@id AND (duration_sec IS NULL OR duration_sec <= 0)
+            WHERE id=@id AND (duration_sec IS NULL OR duration_sec <= 0 OR ABS(duration_sec - @d) > 10)
             """;
         var pD = cmd.Parameters.Add("@d", SqliteType.Real);
         var pId = cmd.Parameters.Add("@id", SqliteType.Integer);
@@ -447,15 +452,24 @@ public class DbService
     }
 
     /// <summary>转写成功后落库全文（供检索）与时长（秒）。</summary>
-    public void SaveTranscriptResult(long id, string plainText, double durationSec)
+    /// <summary>
+    /// 转写完成落库：全文与双时长（总时长=容器实际时长；有声音时长=VAD 后语音时长）。
+    /// speechSec 传 null 时保留原值（旧版边车无此字段）。
+    /// </summary>
+    public void SaveTranscriptResult(long id, string plainText, double durationSec, double? speechSec)
     {
         using var c = OpenConn();
         using var cmd = c.CreateCommand();
         cmd.CommandText = """
-            UPDATE recordings SET transcript_text=@t, duration_sec=@d WHERE id=@id
+            UPDATE recordings SET
+                transcript_text = @t,
+                duration_sec    = @d,
+                speech_sec      = COALESCE(@s, speech_sec)
+            WHERE id = @id
             """;
         cmd.Parameters.AddWithValue("@t", plainText);
         cmd.Parameters.AddWithValue("@d", durationSec);
+        cmd.Parameters.AddWithValue("@s", (object?)speechSec ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@id", id);
         cmd.ExecuteNonQuery();
     }
@@ -651,6 +665,7 @@ public class DbService
             TranscriptPath = r.IsDBNull(r.GetOrdinal("transcript_path")) ? null : r.GetString(r.GetOrdinal("transcript_path")),
             Language = r.IsDBNull(r.GetOrdinal("language")) ? null : r.GetString(r.GetOrdinal("language")),
             DurationSec = r.IsDBNull(r.GetOrdinal("duration_sec")) ? null : r.GetDouble(r.GetOrdinal("duration_sec")),
+            SpeechSec = r.IsDBNull(r.GetOrdinal("speech_sec")) ? null : r.GetDouble(r.GetOrdinal("speech_sec")),
             TranscriptAttempts = r.GetInt32(r.GetOrdinal("transcript_attempts")),
             TranscriptProgress = r.IsDBNull(r.GetOrdinal("transcript_progress")) ? 0 : r.GetDouble(r.GetOrdinal("transcript_progress")),
             TranscriptPartial = r.IsDBNull(r.GetOrdinal("transcript_partial")) ? null : r.GetString(r.GetOrdinal("transcript_partial")),

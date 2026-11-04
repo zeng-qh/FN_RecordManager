@@ -84,6 +84,16 @@ function fmtDuration(sec) {
   return `${h}:${p(m)}:${p(s)}`;
 }
 
+// 双时长显示：总时长（文件实际时长）+ 有声音时长（VAD 过滤静音后语音时长）。
+// 两者接近（差 <10s）或无语音时长时只显示总时长，避免冗余噪音。
+function fmtDurPair(total, speech) {
+  const t = fmtDuration(total);
+  if (!t) return null;
+  const s = fmtDuration(speech);
+  if (!s || Math.abs((total || 0) - (speech || 0)) < 10) return t;
+  return `${t}（有声 ${s}）`;
+}
+
 // ---- 加载与渲染 ----
 async function loadRecordings(reset = true) {
   if (state.loading) return false;
@@ -196,7 +206,7 @@ function renderItem(it) {
 
   const meta = el("div", "meta");
   meta.appendChild(el("div", "name", escapeHtml(it.title || it.fileName)));
-  const dur = fmtDuration(it.durationSec);
+  const dur = fmtDurPair(it.durationSec, it.speechSec);
   meta.appendChild(
     el("div", "sub",
       `${fmtClock(it.recordedAt)} · ${dur ? dur + " · " : ""}${fmtSize(it.size)} · ${it.device}`)
@@ -354,10 +364,14 @@ async function openDetail(id) {
     const rec = await res.json();
 
     $("#dTitle").textContent = rec.title || rec.fileName;
-    const dur = fmtDuration(rec.durationSec);
-    $("#dMeta").textContent =
-      `${fmtDate(rec.recordedAt)} ${fmtClock(rec.recordedAt)}`
-      + `${dur ? " · 时长 " + dur : ""} · ${fmtSize(rec.size)} · 设备 ${rec.device}`;
+    // 双时长渲染：初始显示与播放器校正后共用
+    const renderDur = () => {
+      const dur = fmtDurPair(rec.durationSec, rec.speechSec);
+      $("#dMeta").textContent =
+        `${fmtDate(rec.recordedAt)} ${fmtClock(rec.recordedAt)}`
+        + `${dur ? " · 时长 " + dur : ""} · ${fmtSize(rec.size)} · 设备 ${rec.device}`;
+    };
+    renderDur();
     $("#dInfo").innerHTML =
       `<div>文件名：${escapeHtml(rec.fileName || "-")}</div>` +
       `<div>路径：${escapeHtml(rec.relPath || "-")}</div>` +
@@ -372,6 +386,22 @@ async function openDetail(id) {
     const url = `${base}/api/recordings/${id}/file?token=${encodeURIComponent(state.token)}`;
     const audio = $("#dAudio");
     audio.src = url;
+    // 播放器元数据加载后校正时长：早期版本时长取「最后一段语音的结束时间」，
+    // 尾部静音较长的录音（如微信挂机忘停）会偏短很多；此处以容器真实时长
+    // 为准回写并刷新界面（差 >10s 才校正，避免与转写时长的小幅差异抖动）
+    audio.onloadedmetadata = () => {
+      const real = audio.duration;
+      if (!isFinite(real) || real <= 0) return;
+      if (Math.abs(real - (rec.durationSec || 0)) > 10) {
+        rec.durationSec = real;
+        renderDur(); // 以容器真实时长为准刷新显示（有声时长保持转写值）
+        api("/api/recordings/durations", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify([{ id, durationSec: Math.round(real * 10) / 10 }]),
+        }).catch(() => {});
+      }
+    };
     const dl = $("#dDownload");
     dl.href = url;
     dl.setAttribute("download", rec.fileName || `recording-${id}`);
@@ -1327,7 +1357,7 @@ const tState = {
   serverNow: 0,           // 服务端时间（秒），校准「已进行」计时（避免客户端时钟偏差）
   fetchedAt: 0,           // 本次拉取的本地时刻（秒）
   selected: new Set(),
-  selDuration: new Map(), // id → durationSec（批量栏总时长/预计耗时）
+  selDuration: new Map(), // id → 语音时长（批量栏累计/预计耗时；speechSec 缺省用 durationSec）
   pollTimer: null,
   probeTried: new Set(),  // 本次会话已尝试探测时长的 id（防失败反复重试）
   backfillBusy: false,
@@ -1438,7 +1468,7 @@ function renderTranscribe() {
     gchk.indeterminate = !allSel && arr.some((it) => tState.selected.has(it.id));
     gchk.onchange = () => {
       for (const it of arr) {
-        if (gchk.checked) { tState.selected.add(it.id); tState.selDuration.set(it.id, it.durationSec || 0); }
+        if (gchk.checked) { tState.selected.add(it.id); tState.selDuration.set(it.id, it.speechSec || it.durationSec || 0); }
         else { tState.selected.delete(it.id); tState.selDuration.delete(it.id); }
       }
       renderTranscribe();
@@ -1467,7 +1497,7 @@ function renderTRow(it) {
   chk.type = "checkbox";
   chk.checked = tState.selected.has(it.id);
   chk.onchange = () => {
-    if (chk.checked) { tState.selected.add(it.id); tState.selDuration.set(it.id, it.durationSec || 0); }
+    if (chk.checked) { tState.selected.add(it.id); tState.selDuration.set(it.id, it.speechSec || it.durationSec || 0); }
     else { tState.selected.delete(it.id); tState.selDuration.delete(it.id); }
     row.classList.toggle("selected", chk.checked);
     syncTBatch();
@@ -1477,7 +1507,7 @@ function renderTRow(it) {
   meta.appendChild(el("div", "t-name", escapeHtml(it.title || it.fileName)));
 
   // 状态行：时长 + （已进行/实际耗时/预计耗时）+ 徽标
-  const bits = [it.durationSec ? fmtDuration(it.durationSec) : "时长探测中…"];
+  const bits = [it.durationSec ? (fmtDurPair(it.durationSec, it.speechSec) || "时长探测中…") : "时长探测中…"];
   if (it.transcriptStatus === "pending") {
     if (it.transcribeStartedAt > 0) {
       const elapsed = Math.max(0, (tState.serverNow + (Date.now() / 1000 - tState.fetchedAt)) - it.transcribeStartedAt);
@@ -1485,9 +1515,9 @@ function renderTRow(it) {
     }
   } else if (it.transcriptStatus === "done" && it.transcribeMs > 0) {
     bits.push(`实际耗时 ${fmtDuration(it.transcribeMs / 1000)}`);
-  } else if (!it.noTranscribe && it.durationSec && tState.speed > 0 &&
+  } else if (!it.noTranscribe && (it.speechSec || it.durationSec) && tState.speed > 0 &&
              ["none", "idle", "error"].includes(it.transcriptStatus || "none")) {
-    bits.push(`预计 ${fmtDuration(it.durationSec / tState.speed)}`);
+    bits.push(`预计 ${fmtDuration((it.speechSec || it.durationSec) / tState.speed)}`);
   }
   const badgeHtml = it.noTranscribe
     ? '<span class="badge skipb">🚫 不转写</span>'

@@ -53,8 +53,17 @@ public class Recording
     /// <summary>识别出的语言代码。</summary>
     public string? Language { get; set; }
 
-    /// <summary>录音时长（秒）；转写完成后由末段 end 提取，未转写时为空。</summary>
+    /// <summary>
+    /// 录音总时长（秒）＝音频文件实际时长（含尾部静音）。
+    /// 优先取边车读到的容器时长；未转写时可由前端 audio 元数据探测回填。
+    /// </summary>
     public double? DurationSec { get; set; }
+
+    /// <summary>
+    /// 有声音时长（秒）＝VAD 过滤静音后的语音时长，转写完成后才有。
+    /// 与总时长允许不一致（如微信挂机忘停：语音 1:21:20、总长 2:00:00）。
+    /// </summary>
+    public double? SpeechSec { get; set; }
 
     /// <summary>转写已失败次数（闲时窗口内自动重试，达上限后仅可手动重试）。</summary>
     public int TranscriptAttempts { get; set; }

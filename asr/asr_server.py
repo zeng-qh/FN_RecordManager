@@ -24,6 +24,7 @@ VoiceVault 本地语音转写边车（ASR）
   docker build -t voicvault-asr . && docker run -p 8000:8000 -v $PWD/models:/root/.cache voicvault-asr
 """
 import argparse
+import av  # faster-whisper 依赖 PyAV；此处用于读取音频容器真实时长
 import os
 import tempfile
 import threading
@@ -102,6 +103,16 @@ def _run_job(task_id: str, tmp_path: str, model_size: str, diarize: bool):
         model_inst = get_model(model_size)
         update(status="running", progress=1)
 
+        # 容器真实时长（含尾部静音）：faster-whisper 的 info.duration 在
+        # vad_filter 开启时是「过滤掉静音后的时长」，尾部静音较长的录音
+        # （如微信挂机忘停）会明显偏短，时长展示应以文件真实时长为准
+        container_duration = 0.0
+        try:
+            with av.open(tmp_path) as c:
+                container_duration = float(c.duration or 0.0) / 1_000_000  # 微秒→秒
+        except Exception:
+            container_duration = 0.0  # 读不出容器时长时由调用方回退末段 end
+
         segments, info = model_inst.transcribe(
             tmp_path, beam_size=5, vad_filter=True, language=None,
             # 引导普通话上下文：减少幻觉/方言偏置，简繁由后处理统一
@@ -109,6 +120,8 @@ def _run_job(task_id: str, tmp_path: str, model_size: str, diarize: bool):
         )
         zh = bool(info.language) and str(info.language).lower().startswith("zh")
         duration = float(getattr(info, "duration", 0.0) or 0.0)
+        # vad_filter 开启时 info.duration = 过滤静音后保留的语音时长
+        #（「有声音时间」）；容器真实时长见 container_duration（「总时长」）
 
         out_segments = []
         partial_parts = []
@@ -150,6 +163,8 @@ def _run_job(task_id: str, tmp_path: str, model_size: str, diarize: bool):
             language=str(info.language or ""),
             segments=out_segments,
             text=text,
+            duration=container_duration,
+            speech=duration,
             error=None,
         )
     except Exception:
@@ -179,7 +194,8 @@ def transcribe(
 
     with _jobs_lock:
         _jobs[task_id] = {"status": "queued", "progress": 0.0, "partial": "",
-                          "language": None, "segments": None, "text": None, "error": None}
+                          "language": None, "segments": None, "text": None,
+                          "duration": 0.0, "speech": 0.0, "error": None}
     threading.Thread(target=_run_job, args=(task_id, tmp_path, model, diarize), daemon=True).start()
 
     while True:
@@ -195,6 +211,8 @@ def transcribe(
                 "text": job.get("text") or "",
                 "segments": job.get("segments") or [],
                 "language": job.get("language"),
+                "duration": job.get("duration", 0.0),
+            "speech": job.get("speech", 0.0),
             }
 
 
@@ -214,7 +232,8 @@ def transcribe_async(
     with _jobs_lock:
         # 同任务重复提交：先清旧状态（调用方语义是重启该任务）
         _jobs[task_id] = {"status": "queued", "progress": 0.0, "partial": "",
-                          "language": None, "segments": None, "text": None, "error": None}
+                          "language": None, "segments": None, "text": None,
+                          "duration": 0.0, "speech": 0.0, "error": None}
     threading.Thread(target=_run_job, args=(task_id, tmp_path, model, diarize), daemon=True).start()
     return {"task_id": task_id}
 
@@ -232,6 +251,8 @@ def transcribe_status(task_id: str):
             "language": job.get("language"),
             "segments": job.get("segments"),
             "text": job.get("text"),
+            "duration": job.get("duration", 0.0),
+            "speech": job.get("speech", 0.0),
             "error": job.get("error"),
         }
 
