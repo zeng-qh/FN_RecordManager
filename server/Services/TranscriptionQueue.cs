@@ -7,6 +7,8 @@ namespace VoiceVault.Server.Services;
 /// <summary>
 /// 后台转写队列：所有转写任务（手动触发 / 上传后自动触发）统一排队，
 /// 逐条串行执行，避免并发打满 NAS 资源。
+/// 每次转写记录实际耗时，并按音频时长自适应修正全局速度因子
+/// （供「转写预计耗时」估算），持久化到 settings.json。
 /// </summary>
 public class TranscriptionQueue : BackgroundService
 {
@@ -17,15 +19,17 @@ public class TranscriptionQueue : BackgroundService
     private readonly DbService _db;
     private readonly AsrClient _asr;
     private readonly VaultConfig _cfg;
+    private readonly SettingsStore _settings;
     private readonly ILogger<TranscriptionQueue> _logger;
     private readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
 
     public TranscriptionQueue(
-        DbService db, AsrClient asr, VaultConfig cfg, ILogger<TranscriptionQueue> logger)
+        DbService db, AsrClient asr, VaultConfig cfg, SettingsStore settings, ILogger<TranscriptionQueue> logger)
     {
         _db = db;
         _asr = asr;
         _cfg = cfg;
+        _settings = settings;
         _logger = logger;
     }
 
@@ -84,6 +88,13 @@ public class TranscriptionQueue : BackgroundService
             _logger.LogWarning("Transcribe skipped: recording {Id} not found", id);
             return;
         }
+        if (rec.NoTranscribe)
+        {
+            // 入队后被标记「默认不转写」：退回未转写状态，不再执行
+            _logger.LogInformation("Transcribe skipped: id={Id} marked no-transcribe", id);
+            _db.UpdateTranscript(id, "", "none", null);
+            return;
+        }
         if (!File.Exists(rec.StoredPath))
         {
             _logger.LogWarning("Transcribe failed: file missing {Path}", rec.StoredPath);
@@ -91,34 +102,74 @@ public class TranscriptionQueue : BackgroundService
             return;
         }
 
+        // 实际耗时计时：开始时间供前端显示「已进行」，收尾落库总耗时
+        _db.SetTranscribeStarted(id, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
         _db.UpdateTranscript(id, "", "pending", null);
-        // 边车每产出一段即回调：进度与部分文本实时落库，前端轮询即可流式展示
-        var result = await _asr.TranscribeAsync(id, rec.StoredPath,
-            onProgress: (progress, partial) => _db.UpdateTranscriptProgress(id, progress, partial),
-            ct: ct);
-        if (result is null)
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        try
         {
-            _logger.LogWarning("ASR sidecar returned no result for id={Id}", id);
-            // 边车临时不可用属可重试错误：计次，闲时窗口内自动重试
-            _db.UpdateTranscript(id, "", "error", null, attemptsDelta: +1);
-            return;
+            // 边车每产出一段即回调：进度与部分文本实时落库，前端轮询即可流式展示
+            var result = await _asr.TranscribeAsync(id, rec.StoredPath,
+                onProgress: (progress, partial) => _db.UpdateTranscriptProgress(id, progress, partial),
+                ct: ct);
+            if (result is null)
+            {
+                _logger.LogWarning("ASR sidecar returned no result for id={Id}", id);
+                // 边车临时不可用属可重试错误：计次，闲时窗口内自动重试
+                _db.UpdateTranscript(id, "", "error", null, attemptsDelta: +1);
+                return;
+            }
+
+            var tDir = Path.Combine(_cfg.DataDir, "transcripts");
+            Directory.CreateDirectory(tDir);
+            var tPath = Path.Combine(tDir, $"{id}.json");
+            await File.WriteAllTextAsync(tPath, JsonSerializer.Serialize(result, _json), ct);
+
+            // 全文与时长落库：全文供关键词检索（列 transcript_text），时长取末段 end（秒）
+            var plainText = !string.IsNullOrWhiteSpace(result.Text)
+                ? result.Text!
+                : string.Join("\n", (result.Segments ?? []).Select(s => s.Text ?? ""));
+            var durationSec = (result.Segments is { Count: > 0 }) ? result.Segments[^1].End : 0;
+            if (plainText.Length > 0 || durationSec > 0)
+                _db.SaveTranscriptResult(id, plainText, durationSec);
+
+            _db.UpdateTranscript(id, tPath, "done", result.Language, attemptsDelta: -1_000_000); // 成功清零重试计数
+            _logger.LogInformation("Transcribed id={Id} lang={Lang} segments={Seg} duration={Dur:F1}s elapsed={Elapsed:F1}s",
+                id, result.Language, result.Segments?.Count ?? 0, durationSec, sw.Elapsed.TotalSeconds);
+
+            AdaptSpeedFactor(durationSec, sw.Elapsed.TotalSeconds);
         }
+        finally
+        {
+            sw.Stop();
+            _db.SetTranscribeElapsed(id, sw.ElapsedMilliseconds); // 成功与失败均记录本次耗时
+        }
+    }
 
-        var tDir = Path.Combine(_cfg.DataDir, "transcripts");
-        Directory.CreateDirectory(tDir);
-        var tPath = Path.Combine(tDir, $"{id}.json");
-        await File.WriteAllTextAsync(tPath, JsonSerializer.Serialize(result, _json), ct);
-
-        // 全文与时长落库：全文供关键词检索（列 transcript_text），时长取末段 end（秒）
-        var plainText = !string.IsNullOrWhiteSpace(result.Text)
-            ? result.Text!
-            : string.Join("\n", (result.Segments ?? []).Select(s => s.Text ?? ""));
-        var durationSec = (result.Segments is { Count: > 0 }) ? result.Segments[^1].End : 0;
-        if (plainText.Length > 0 || durationSec > 0)
-            _db.SaveTranscriptResult(id, plainText, durationSec);
-
-        _db.UpdateTranscript(id, tPath, "done", result.Language, attemptsDelta: -1_000_000); // 成功清零重试计数
-        _logger.LogInformation("Transcribed id={Id} lang={Lang} segments={Seg} duration={Dur:F1}s",
-            id, result.Language, result.Segments?.Count ?? 0, durationSec);
+    /// <summary>
+    /// 按本次实际转写修正全局速度因子（实时倍率 = 音频时长 / 实际耗时）。
+    /// EMA 平滑（0.7 旧值 + 0.3 本次）避免单条异常数据引起大幅波动；
+    /// 持久化到 settings.json，重启后估算仍然准确。
+    /// </summary>
+    private void AdaptSpeedFactor(double audioSec, double elapsedSec)
+    {
+        if (audioSec <= 1 || elapsedSec <= 0.5) return; // 时长过短/异常快的样本不可信
+        var actual = audioSec / elapsedSec;
+        var next = _cfg.TranscribeSpeed <= 0 ? actual : _cfg.TranscribeSpeed * 0.7 + actual * 0.3;
+        _cfg.TranscribeSpeed = Math.Clamp(next, 0.2, 100);
+        try
+        {
+            _settings.Save(new StoredSettings
+            {
+                Asr = _cfg.Asr,
+                Retention = _cfg.Retention,
+                PageSize = _cfg.PageSize,
+                TranscribeSpeed = _cfg.TranscribeSpeed
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to persist transcribe speed factor");
+        }
     }
 }

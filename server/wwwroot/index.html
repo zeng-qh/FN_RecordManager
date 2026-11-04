@@ -18,6 +18,7 @@
     <div class="actions">
       <input id="search" type="search" placeholder="搜索文件名 / 标题…" />
       <button id="manageBtn" title="多选管理">☑️</button>
+      <button id="tBtn" title="转写管理">🎯</button>
       <button id="uploadBtn" title="上传录音">⬆️</button>
       <button id="refresh" title="刷新">🔄</button>
       <button id="settingsBtn" title="设置">⚙️</button>
@@ -75,6 +76,43 @@
           <path class="done-tick" fill="none" d="M14 27l8 8 16-16"/>
         </svg>
         <div class="done-text">上传完成</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 转写管理：待转写列表 / 分组勾选 / 批量转写 / 「不转写」标记 / 预计与实际耗时 -->
+  <div id="tModal" class="modal" hidden>
+    <div class="modal-card t-card">
+      <div class="t-head">
+        <h2>转写管理</h2>
+        <button id="tClose" title="关闭">✕</button>
+      </div>
+      <div id="tStats" class="t-stats">加载中…</div>
+      <div class="t-toolbar">
+        <input id="tFilter" type="search" placeholder="过滤文件名 / 标题…" />
+        <label class="t-regex" title="把输入内容按正则表达式匹配">
+          <input id="tRegexChk" type="checkbox" /> .*
+        </label>
+        <select id="tView" title="按转写状态筛选">
+          <option value="todo" selected>待转写</option>
+          <option value="pending">转写中</option>
+          <option value="done">已转写</option>
+          <option value="skip">不转写</option>
+          <option value="all">全部</option>
+        </select>
+      </div>
+      <div class="t-actions">
+        <button id="tEnqueueAll" class="primary">⚡ 一键转写全部</button>
+        <span id="tFilterHint" class="t-hint"></span>
+      </div>
+      <div id="tList" class="t-list"></div>
+      <div id="tBatchBar" class="t-batch" hidden>
+        <span id="tBatchInfo">已选 0 条</span>
+        <button id="tBatchAll" title="勾选当前显示的全部条目">全选</button>
+        <button id="tBatchEnqueue" class="primary">⚡ 转写所选</button>
+        <button id="tBatchSkip" title="标记后批量转写自动跳过">🚫 不转写</button>
+        <button id="tBatchUnskip" title="取消「不转写」标记">↩ 取消标记</button>
+        <button id="tBatchCancel">取消</button>
       </div>
     </div>
   </div>

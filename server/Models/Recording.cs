@@ -74,6 +74,15 @@ public class Recording
     /// <summary>分类类型：phone（电话号码）/ wechat（微信联系人）。</summary>
     public string? ContactKind { get; set; }
 
+    /// <summary>「默认不转写」标记：批量/一键转写时自动跳过（单条手动转写不受限）。</summary>
+    public bool NoTranscribe { get; set; }
+
+    /// <summary>最近一次转写实际耗时（毫秒）；未转写过为空。</summary>
+    public long? TranscribeMs { get; set; }
+
+    /// <summary>最近一次转写开始时间（Unix 秒）；转写进行中供前端显示「已进行」。</summary>
+    public long? TranscribeStartedAt { get; set; }
+
     /// <summary>入库时间（ISO8601）。</summary>
     public DateTime CreatedAt { get; set; }
 }

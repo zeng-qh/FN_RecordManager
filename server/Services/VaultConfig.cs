@@ -100,4 +100,11 @@ public class VaultConfig
 
     /// <summary>列表每页条数（用户偏好，网页端设置持久化到 settings.json）。</summary>
     public int PageSize { get; set; } = 20;
+
+    /// <summary>
+    /// 转写速度因子（实时倍率）：1 秒音频实际转写耗时 = 1 / 该值 秒。
+    /// 初始为经验默认值；每完成一次转写按实际耗时 EMA 自适应修正（见 TranscriptionQueue），
+    /// 持久化到 settings.json，供「转写预计耗时」估算。
+    /// </summary>
+    public double TranscribeSpeed { get; set; } = 4.0;
 }

@@ -73,7 +73,7 @@ function fmtSec(s) {
   return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
 }
 
-// 录音时长：超过 1 小时显示 h:mm:ss
+// 时长统一显示 时:分:秒（h:mm:ss）；不足 1 小时也带小时位，保证对齐与「预计耗时」口径一致
 function fmtDuration(sec) {
   if (sec == null || !isFinite(sec) || sec <= 0) return null;
   const t = Math.round(sec);
@@ -81,7 +81,7 @@ function fmtDuration(sec) {
   const m = Math.floor((t % 3600) / 60);
   const s = t % 60;
   const p = (n) => String(n).padStart(2, "0");
-  return h > 0 ? `${h}:${p(m)}:${p(s)}` : `${p(m)}:${p(s)}`;
+  return `${h}:${p(m)}:${p(s)}`;
 }
 
 // ---- 加载与渲染 ----
@@ -819,6 +819,18 @@ async function runUploadItem(item) {
     setStatus(comp.dedup ? `服务器已有：${f.name}（已去重，未重复存储）` : `已上传：${f.name}`);
     maybeFinishUploads(); // 全部完成时播对钩动画并自动关窗
     loadRecordings(true);
+    // 异步补写录音时长（浏览器元数据读出，供转写「预计耗时」估算；
+    // 服务端只回填空缺值，不会覆盖转写得到的精确时长）
+    probeFileDuration(URL.createObjectURL(f))
+      .then((dur) => {
+        if (dur <= 0) return;
+        return api("/api/recordings/durations", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify([{ id: comp.id, durationSec: Math.round(dur * 10) / 10 }]),
+        });
+      })
+      .catch(() => {});
   } catch (err) {
     setItemState(item, "failed", "");
     const retry = el("button", "u-retry", "续传");
@@ -1184,7 +1196,10 @@ $("#detailModal").addEventListener("click", (e) => {
   if (e.target.id === "detailModal") closeDetail();
 });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !$("#detailModal").hidden) closeDetail();
+  if (e.key === "Escape") {
+    if (!$("#detailModal").hidden) closeDetail();
+    else if (!$("#tModal").hidden) closeTranscribe();
+  }
 });
 
 // 详情页键盘快捷键：空格 播放/暂停，←/→ 快退/快进 5 秒
@@ -1296,6 +1311,351 @@ $("#clearFilters").onclick = () => {
   $("#monthFilter").value = "";
   syncClearBtn();
   loadRecordings(true);
+};
+
+// ---- 转写管理弹窗 ----
+// 需求：一键转写全部未转写 / 按来源分组勾选转写 / 「不转写」标记（批量转写自动跳过）/
+// 文件名或正则过滤 / 勾选后按时长估算预计耗时 / 实际耗时展示 / 时长统一 h:mm:ss。
+const tState = {
+  open: false,
+  view: "todo",           // todo / pending / done / skip / all
+  filter: "",             // 文件名/标题过滤（regex 开关启用正则）
+  regex: false,
+  items: [],
+  counts: null,
+  speed: 4.0,             // 速度因子（实时倍率），服务端按实际转写耗时自适应
+  serverNow: 0,           // 服务端时间（秒），校准「已进行」计时（避免客户端时钟偏差）
+  fetchedAt: 0,           // 本次拉取的本地时刻（秒）
+  selected: new Set(),
+  selDuration: new Map(), // id → durationSec（批量栏总时长/预计耗时）
+  pollTimer: null,
+  probeTried: new Set(),  // 本次会话已尝试探测时长的 id（防失败反复重试）
+  backfillBusy: false,
+};
+
+function openTranscribe() {
+  $("#tModal").hidden = false;
+  tState.open = true;
+  tState.probeTried.clear();
+  refreshTranscribe(true);
+}
+function closeTranscribe() {
+  $("#tModal").hidden = true;
+  tState.open = false;
+  stopTPoll();
+}
+
+async function refreshTranscribe(resetSelection = false) {
+  if (resetSelection) { tState.selected.clear(); tState.selDuration.clear(); }
+  try {
+    const res = await api(`/api/transcribe/list?status=${encodeURIComponent(tState.view)}`);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const d = await res.json();
+    tState.items = d.items || [];
+    tState.counts = d.counts || {};
+    tState.speed = d.speed > 0 ? d.speed : 4.0;
+    tState.serverNow = d.now || Math.floor(Date.now() / 1000);
+    tState.fetchedAt = Date.now() / 1000;
+    // 清掉已不在当前视图的选中项（如转写完成后移出待转写视图）
+    const ids = new Set(tState.items.map((it) => it.id));
+    for (const id of [...tState.selected]) {
+      if (!ids.has(id)) { tState.selected.delete(id); tState.selDuration.delete(id); }
+    }
+    renderTranscribe();
+    scheduleTPoll();
+    backfillDurations();
+  } catch (e) {
+    if (e.message !== "unauthorized") $("#tStats").textContent = "加载失败：" + e.message;
+  }
+}
+
+// 弹窗打开且有转写任务进行中时 3s 轮询（进度/已进行/实际耗时实时更新）
+function scheduleTPoll() {
+  stopTPoll();
+  if (!tState.open) return;
+  const c = tState.counts || {};
+  if ((c.pending || 0) > 0 || tState.view === "pending") {
+    tState.pollTimer = setTimeout(() => refreshTranscribe(false), 3000);
+  }
+}
+function stopTPoll() {
+  if (tState.pollTimer) { clearTimeout(tState.pollTimer); tState.pollTimer = null; }
+}
+
+// 过滤：普通模式子串匹配（不分大小写）；正则模式整串按正则匹配（忽略大小写）
+function tMatch(it) {
+  const s = tState.filter.trim();
+  if (!s) return true;
+  const target = `${it.title || ""} ${it.fileName || ""}`;
+  if (!tState.regex) return target.toLowerCase().includes(s.toLowerCase());
+  try { return new RegExp(s, "i").test(target); } catch { return true; }
+}
+function tRegexInvalid() {
+  if (!tState.regex || !tState.filter.trim()) return false;
+  try { new RegExp(tState.filter.trim(), "i"); return false; } catch { return true; }
+}
+
+function renderTranscribe() {
+  const c = tState.counts || {};
+  const allEst = (c.todoDurationSec || 0) / tState.speed;
+  $("#tStats").innerHTML =
+    `待转写 <b>${c.todo ?? 0}</b> · 转写中 <b>${c.pending ?? 0}</b> · ` +
+    `已转写 <b>${c.done ?? 0}</b> · 失败 <b>${c.error ?? 0}</b> · 不转写 <b>${c.skipped ?? 0}</b>` +
+    `<span class="t-speed"> · 速度 ≈ ${tState.speed.toFixed(1)}x 实时</span>`;
+  const allBtn = $("#tEnqueueAll");
+  allBtn.textContent = (c.todo || 0) > 0
+    ? `⚡ 一键转写全部（${c.todo} 条${allEst > 1 ? ` · 约 ${fmtDuration(allEst)}` : ""}）`
+    : "⚡ 一键转写全部（无待转写）";
+  allBtn.disabled = !(c.todo > 0);
+
+  const invalid = tRegexInvalid();
+  $("#tFilter").classList.toggle("err", invalid);
+  $("#tFilterHint").textContent = invalid ? "正则表达式无效" : "";
+
+  const list = $("#tList");
+  list.innerHTML = "";
+  const items = tState.items.filter(tMatch);
+  if (!items.length) {
+    list.appendChild(el("div", "t-empty",
+      tState.filter ? "没有匹配过滤条件的录音。" : "这里空空如也。"));
+    syncTBatch();
+    return;
+  }
+  // 按来源分组（未分类的归「未分类」）；组头可整组勾选/转写
+  const groups = new Map();
+  for (const it of items) {
+    const key = it.contact || "";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(it);
+  }
+  for (const [contact, arr] of groups) {
+    const g = el("div", "t-group");
+    const head = el("div", "t-group-head");
+    const gchk = el("input", "pick");
+    gchk.type = "checkbox";
+    const allSel = arr.every((it) => tState.selected.has(it.id));
+    gchk.checked = allSel;
+    gchk.indeterminate = !allSel && arr.some((it) => tState.selected.has(it.id));
+    gchk.onchange = () => {
+      for (const it of arr) {
+        if (gchk.checked) { tState.selected.add(it.id); tState.selDuration.set(it.id, it.durationSec || 0); }
+        else { tState.selected.delete(it.id); tState.selDuration.delete(it.id); }
+      }
+      renderTranscribe();
+    };
+    const icon = contact ? (arr[0].contactKind === "phone" ? "📞" : "💬") : "📁";
+    const totalDur = arr.reduce((a, b) => a + (b.durationSec || 0), 0);
+    head.appendChild(gchk);
+    head.appendChild(el("div", "t-group-name",
+      `${icon} ${escapeHtml(contact || "未分类")}` +
+      `<small>${arr.length} 条 · ${fmtDuration(totalDur) || "时长未知"}</small>`));
+    const gBtn = el("button", null, "⚡ 转写本组");
+    gBtn.title = "把该组可转写的条目加入队列（已标记不转写的自动跳过）";
+    gBtn.onclick = () => tEnqueue(arr.filter((it) => !it.noTranscribe).map((it) => it.id), arr.length);
+    head.appendChild(gBtn);
+    g.appendChild(head);
+    for (const it of arr) g.appendChild(renderTRow(it));
+    list.appendChild(g);
+  }
+  syncTBatch();
+}
+
+function renderTRow(it) {
+  const row = el("div", "t-row" + (it.noTranscribe ? " skip" : ""));
+  if (tState.selected.has(it.id)) row.classList.add("selected");
+  const chk = el("input", "pick");
+  chk.type = "checkbox";
+  chk.checked = tState.selected.has(it.id);
+  chk.onchange = () => {
+    if (chk.checked) { tState.selected.add(it.id); tState.selDuration.set(it.id, it.durationSec || 0); }
+    else { tState.selected.delete(it.id); tState.selDuration.delete(it.id); }
+    row.classList.toggle("selected", chk.checked);
+    syncTBatch();
+  };
+
+  const meta = el("div", "t-meta");
+  meta.appendChild(el("div", "t-name", escapeHtml(it.title || it.fileName)));
+
+  // 状态行：时长 + （已进行/实际耗时/预计耗时）+ 徽标
+  const bits = [it.durationSec ? fmtDuration(it.durationSec) : "时长探测中…"];
+  if (it.transcriptStatus === "pending") {
+    if (it.transcribeStartedAt > 0) {
+      const elapsed = Math.max(0, (tState.serverNow + (Date.now() / 1000 - tState.fetchedAt)) - it.transcribeStartedAt);
+      bits.push(`已进行 ${fmtDuration(elapsed)}`);
+    }
+  } else if (it.transcriptStatus === "done" && it.transcribeMs > 0) {
+    bits.push(`实际耗时 ${fmtDuration(it.transcribeMs / 1000)}`);
+  } else if (!it.noTranscribe && it.durationSec && tState.speed > 0 &&
+             ["none", "idle", "error"].includes(it.transcriptStatus || "none")) {
+    bits.push(`预计 ${fmtDuration(it.durationSec / tState.speed)}`);
+  }
+  const badgeHtml = it.noTranscribe
+    ? '<span class="badge skipb">🚫 不转写</span>'
+    : statusBadge(it);
+  meta.appendChild(el("div", "t-sub",
+    `<span>${escapeHtml(bits.join(" · "))}</span> ${badgeHtml}`));
+
+  const ops = el("div", "t-ops");
+  const mark = el("button", null, it.noTranscribe ? "↩" : "🚫");
+  mark.title = it.noTranscribe ? "取消「不转写」标记" : "标记为「不转写」（批量/一键转写将跳过）";
+  mark.onclick = () => tSetSkip([it.id], !it.noTranscribe);
+  ops.appendChild(mark);
+
+  row.append(chk, meta, ops);
+  return row;
+}
+
+// 批量栏：已选条数 + 总时长 + 按速度因子估算的预计耗时
+function syncTBatch() {
+  const bar = $("#tBatchBar");
+  bar.hidden = tState.selected.size === 0;
+  if (bar.hidden) return;
+  let dur = 0;
+  for (const v of tState.selDuration.values()) dur += v;
+  const est = tState.speed > 0 ? dur / tState.speed : 0;
+  $("#tBatchInfo").innerHTML =
+    `已选 <b>${tState.selected.size}</b> 条 · 总时长 <b>${fmtDuration(dur) || "—"}</b>` +
+    (est > 1 ? ` · 预计约 <b>${fmtDuration(est)}</b>` : " · 预计耗时需先探测时长");
+}
+
+async function tEnqueue(ids, total = ids.length) {
+  if (!ids.length) { setStatus("所选条目均已标记不转写或已转写，无需操作。"); return; }
+  try {
+    const res = await api("/api/transcribe/enqueue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids }),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      alert("无法转写：" + (d.error || res.status));
+      return;
+    }
+    const d = await res.json();
+    const skipNote = total > ids.length ? `（${total - ids.length} 条已标记不转写，自动跳过）` : "";
+    setStatus(`已把 ${d.queued} 条录音加入转写队列${skipNote}${d.skipped ? ` · 另有 ${d.skipped} 条不可转写已忽略` : ""}。`);
+    refreshTranscribe(true);
+  } catch (e) {}
+}
+
+async function tEnqueueAll() {
+  if (!state.asrEnabled) { alert("请先在设置里开启「启用语音转文字」并保存。"); return; }
+  const c = tState.counts || {};
+  if (!(c.todo > 0)) return;
+  const est = (c.todoDurationSec || 0) / tState.speed;
+  const estTxt = est > 1
+    ? `，预计约 ${fmtDuration(est)}（按当前速度 ${tState.speed.toFixed(1)}x 估算；转写与 NAS 其他任务并行时可能更慢）`
+    : "";
+  if (!confirm(`把全部 ${c.todo} 条未转写录音加入队列？将串行执行${estTxt}。`)) return;
+  try {
+    const res = await api("/api/transcribe/enqueue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ all: true }),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      alert("无法批量转写：" + (d.error || res.status));
+      return;
+    }
+    const d = await res.json();
+    setStatus(`已把 ${d.queued} 条录音加入转写队列。`);
+    refreshTranscribe(true);
+  } catch (e) {}
+}
+
+async function tSetSkip(ids, value) {
+  try {
+    const res = await api("/api/transcribe/skip", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids, value }),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      alert("操作失败：" + (d.error || res.status));
+      return;
+    }
+    const d = await res.json();
+    setStatus(value
+      ? `已把 ${d.updated} 条录音标记为「不转写」。`
+      : `已取消 ${d.updated} 条录音的「不转写」标记。`);
+    refreshTranscribe(false);
+  } catch (e) {}
+}
+
+// ---- 未转写录音的时长回填 ----
+// 未转写录音没有时长（转写完才有精确值），而「预计耗时」估算需要它：
+// 前端用 <audio> 元数据（preload=metadata，仅按 Range 拉头部）读出后写回服务端，
+// 不依赖边车/容器卷挂载，浏览器解码器保证格式兼容。
+function probeFileDuration(src) {
+  return new Promise((resolve) => {
+    const a = new Audio();
+    const to = setTimeout(() => { a.src = ""; resolve(0); }, 8000);
+    a.preload = "metadata";
+    a.onloadedmetadata = () => { clearTimeout(to); resolve(isFinite(a.duration) ? a.duration : 0); };
+    a.onerror = () => { clearTimeout(to); resolve(0); };
+    a.src = src;
+  });
+}
+
+async function backfillDurations() {
+  const missing = tState.items
+    .filter((it) => !it.durationSec && !tState.probeTried.has(it.id))
+    .slice(0, 20);
+  if (!missing.length || tState.backfillBusy) return;
+  tState.backfillBusy = true;
+  const base = state.server.replace(/\/$/, "");
+  const patches = [];
+  for (const it of missing) {
+    tState.probeTried.add(it.id);
+    try {
+      const dur = await probeFileDuration(
+        `${base}/api/recordings/${it.id}/file?token=${encodeURIComponent(state.token)}`);
+      if (dur > 0) patches.push({ id: it.id, durationSec: Math.round(dur * 10) / 10 });
+    } catch { /* 探测失败跳过 */ }
+  }
+  tState.backfillBusy = false;
+  if (!patches.length) return;
+  try {
+    await api("/api/recordings/durations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patches),
+    });
+    if (tState.open) refreshTranscribe(false);
+  } catch { /* 回填失败不影响使用 */ }
+}
+
+// ---- 转写管理事件绑定 ----
+$("#tBtn").onclick = openTranscribe;
+$("#tClose").onclick = closeTranscribe;
+$("#tModal").addEventListener("click", (e) => {
+  if (e.target.id === "tModal") closeTranscribe();
+});
+$("#tView").onchange = (e) => { tState.view = e.target.value; refreshTranscribe(true); };
+let tFilterTimer;
+$("#tFilter").oninput = (e) => {
+  clearTimeout(tFilterTimer);
+  tFilterTimer = setTimeout(() => { tState.filter = e.target.value; renderTranscribe(); }, 200);
+};
+$("#tRegexChk").onchange = (e) => { tState.regex = e.target.checked; renderTranscribe(); };
+$("#tEnqueueAll").onclick = tEnqueueAll;
+$("#tBatchEnqueue").onclick = () => tEnqueue([...tState.selected]);
+$("#tBatchSkip").onclick = () => tSetSkip([...tState.selected], true);
+$("#tBatchUnskip").onclick = () => tSetSkip([...tState.selected], false);
+$("#tBatchCancel").onclick = () => {
+  tState.selected.clear();
+  tState.selDuration.clear();
+  renderTranscribe();
+};
+$("#tBatchAll").onclick = () => {
+  // 全选当前过滤后的可见条目
+  tState.items.filter(tMatch).forEach((it) => {
+    tState.selected.add(it.id);
+    tState.selDuration.set(it.id, it.durationSec || 0);
+  });
+  renderTranscribe();
 };
 
 // ---- 初始化 ----

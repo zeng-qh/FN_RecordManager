@@ -61,8 +61,12 @@ public class DbService
             "ALTER TABLE recordings ADD COLUMN transcript_partial TEXT",        // 转写进行中的部分文本（流式预览）
             "ALTER TABLE recordings ADD COLUMN contact TEXT",                   // 联系人/来源分类键（电话号码或微信联系人）
             "ALTER TABLE recordings ADD COLUMN contact_kind TEXT",              // 分类类型：phone / wechat
+            "ALTER TABLE recordings ADD COLUMN no_transcribe INTEGER NOT NULL DEFAULT 0", // 「默认不转写」标记（批量转写跳过）
+            "ALTER TABLE recordings ADD COLUMN transcribe_ms INTEGER",          // 最近一次转写实际耗时（毫秒）
+            "ALTER TABLE recordings ADD COLUMN transcribe_started_at INTEGER",  // 最近一次转写开始时间（Unix 秒）
             // 依赖新增列的索引必须在加列之后创建
             "CREATE INDEX IF NOT EXISTS idx_contact ON recordings(contact)",
+            "CREATE INDEX IF NOT EXISTS idx_no_transcribe ON recordings(no_transcribe)",
         })
         {
             try
@@ -217,11 +221,13 @@ public class DbService
     private const string ListColumns =
         "id, device, rel_path, file_name, stored_path, size, mtime, sha256, title, recorded_at, " +
         "transcript_status, transcript_path, language, duration_sec, transcript_attempts, " +
-        "transcript_progress, transcript_partial, note, contact, contact_kind, created_at";
+        "transcript_progress, transcript_partial, note, contact, contact_kind, created_at, " +
+        "no_transcribe, transcribe_ms, transcribe_started_at";
 
     /// <summary>
     /// 闲时调度器取数：待闲时（idle）的录音 + 转写失败未达重试上限
     /// （error 且 attempts &lt; 3，即初失败后最多自动重试 2 次）的录音。
+    /// 「默认不转写」标记的记录不参与自动调度。
     /// </summary>
     public List<long> GetIdlePendingIds()
     {
@@ -230,8 +236,9 @@ public class DbService
         using var cmd = c.CreateCommand();
         cmd.CommandText = """
             SELECT id FROM recordings
-            WHERE transcript_status = 'idle'
-               OR (transcript_status = 'error' AND transcript_attempts < 3)
+            WHERE COALESCE(no_transcribe, 0) = 0
+              AND (transcript_status = 'idle'
+               OR (transcript_status = 'error' AND transcript_attempts < 3))
             ORDER BY id
             """;
         using var r = cmd.ExecuteReader();
@@ -239,7 +246,10 @@ public class DbService
         return ids;
     }
 
-    /// <summary>返回所有未完成转写的录音 id（none / idle / error），供「全部转写」批量入队。</summary>
+    /// <summary>
+    /// 返回所有未完成转写的录音 id（none / idle / error），供「一键转写」批量入队。
+    /// 排除已转写（done）、进行中（pending）与「默认不转写」标记的记录。
+    /// </summary>
     public List<long> GetTranscribableIds()
     {
         var ids = new List<long>();
@@ -247,12 +257,142 @@ public class DbService
         using var cmd = c.CreateCommand();
         cmd.CommandText = """
             SELECT id FROM recordings
-            WHERE transcript_status IS NULL OR transcript_status NOT IN ('done','pending')
+            WHERE COALESCE(no_transcribe, 0) = 0
+              AND (transcript_status IS NULL OR transcript_status NOT IN ('done','pending'))
             ORDER BY id
             """;
         using var r = cmd.ExecuteReader();
         while (r.Read()) ids.Add(r.GetInt64(0));
         return ids;
+    }
+
+    /// <summary>批量设置「默认不转写」标记，返回实际更新的行数。标记时同步把 idle 状态回置 none（不再被闲时调度）。</summary>
+    public int SetNoTranscribe(List<long> ids, bool value)
+    {
+        if (ids.Count == 0) return 0;
+        using var c = OpenConn();
+        using var cmd = c.CreateCommand();
+        var names = new List<string>();
+        for (var i = 0; i < ids.Count; i++)
+        {
+            names.Add($"@id{i}");
+            cmd.Parameters.AddWithValue($"@id{i}", ids[i]);
+        }
+        cmd.Parameters.AddWithValue("@v", value ? 1 : 0);
+        cmd.CommandText =
+            $"UPDATE recordings SET no_transcribe=@v WHERE id IN ({string.Join(",", names)})";
+        var n = cmd.ExecuteNonQuery();
+
+        // 标记为不转写的记录若正处于「待闲时」状态，回置为未转写（闲时调度已排除 no_transcribe）
+        if (value)
+        {
+            cmd.Parameters.Clear();
+            for (var i = 0; i < ids.Count; i++)
+                cmd.Parameters.AddWithValue($"@id{i}", ids[i]);
+            cmd.CommandText =
+                $"UPDATE recordings SET transcript_status='none' WHERE transcript_status='idle' AND id IN ({string.Join(",", names)})";
+            cmd.ExecuteNonQuery();
+        }
+        return n;
+    }
+
+    /// <summary>转写开始：记录起始时间（前端「已进行」计时用）。</summary>
+    public void SetTranscribeStarted(long id, long unixSec)
+    {
+        using var c = OpenConn();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = "UPDATE recordings SET transcribe_started_at=@t WHERE id=@id";
+        cmd.Parameters.AddWithValue("@t", unixSec);
+        cmd.Parameters.AddWithValue("@id", id);
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>转写收尾：记录本次实际耗时（毫秒，成功与失败均记录，供速度估算与展示）。</summary>
+    public void SetTranscribeElapsed(long id, long ms)
+    {
+        using var c = OpenConn();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = "UPDATE recordings SET transcribe_ms=@ms WHERE id=@id";
+        cmd.Parameters.AddWithValue("@ms", Math.Max(0, ms));
+        cmd.Parameters.AddWithValue("@id", id);
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// 按转写视角列出录音（转写管理弹窗）。status：todo 待转写（含失败）/
+    /// pending 转写中 / done 已转写 / skip 已标记不转写 / all 全部。
+    /// </summary>
+    public List<Recording> ListForTranscribe(string status)
+    {
+        var where = status switch
+        {
+            "todo" => "WHERE COALESCE(no_transcribe,0)=0 AND (transcript_status IS NULL OR transcript_status IN ('none','idle','error'))",
+            "pending" => "WHERE transcript_status='pending'",
+            "done" => "WHERE transcript_status='done'",
+            "skip" => "WHERE COALESCE(no_transcribe,0)=1",
+            _ => "",
+        };
+        var items = new List<Recording>();
+        using var c = OpenConn();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = $"SELECT {ListColumns} FROM recordings {where} ORDER BY recorded_at DESC, id DESC";
+        using var r = cmd.ExecuteReader();
+        while (r.Read()) items.Add(ReadRecording(r));
+        return items;
+    }
+
+    /// <summary>
+    /// 转写统计计数（弹窗顶部条）：
+    /// todo 待转写（未标记，含失败/待闲时）、pending 转写中、done 已转写、
+    /// error 失败（未标记）、skipped 已标记不转写；todoDurationSec 待转写总时长（估算预计耗时用）。
+    /// </summary>
+    public (int Todo, int Pending, int Done, int Error, int Skipped, double TodoDurationSec) TranscribeCounts()
+    {
+        using var c = OpenConn();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = """
+            SELECT
+              SUM(CASE WHEN COALESCE(no_transcribe,0)=0 AND (transcript_status IS NULL OR transcript_status IN ('none','idle','error')) THEN 1 ELSE 0 END),
+              SUM(CASE WHEN transcript_status='pending' THEN 1 ELSE 0 END),
+              SUM(CASE WHEN transcript_status='done' THEN 1 ELSE 0 END),
+              SUM(CASE WHEN transcript_status='error' AND COALESCE(no_transcribe,0)=0 THEN 1 ELSE 0 END),
+              SUM(CASE WHEN COALESCE(no_transcribe,0)=1 THEN 1 ELSE 0 END),
+              COALESCE(SUM(CASE WHEN COALESCE(no_transcribe,0)=0 AND (transcript_status IS NULL OR transcript_status IN ('none','idle','error')) THEN duration_sec END), 0)
+            FROM recordings
+            """;
+        using var r = cmd.ExecuteReader();
+        r.Read();
+        return (
+            (int)(r.IsDBNull(0) ? 0 : r.GetInt64(0)),
+            (int)(r.IsDBNull(1) ? 0 : r.GetInt64(1)),
+            (int)(r.IsDBNull(2) ? 0 : r.GetInt64(2)),
+            (int)(r.IsDBNull(3) ? 0 : r.GetInt64(3)),
+            (int)(r.IsDBNull(4) ? 0 : r.GetInt64(4)),
+            r.IsDBNull(5) ? 0 : r.GetDouble(5));
+    }
+
+    /// <summary>批量回填录音时长（秒）。前端经 audio 元数据读出后写回，供转写估算与列表展示。</summary>
+    public int SetDurations(List<(long Id, double DurationSec)> list)
+    {
+        using var c = OpenConn();
+        using var cmd = c.CreateCommand();
+        var n = 0;
+        using var tx = c.BeginTransaction();
+        cmd.Transaction = tx;
+        cmd.CommandText = """
+            UPDATE recordings SET duration_sec=@d
+            WHERE id=@id AND (duration_sec IS NULL OR duration_sec <= 0)
+            """;
+        var pD = cmd.Parameters.Add("@d", SqliteType.Real);
+        var pId = cmd.Parameters.Add("@id", SqliteType.Integer);
+        foreach (var (id, dur) in list)
+        {
+            pD.Value = dur;
+            pId.Value = id;
+            n += cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+        return n;
     }
 
     /// <summary>删除一条录音记录并返回其元数据（调用方负责删文件）；不存在返回 null。</summary>
@@ -517,6 +657,9 @@ public class DbService
             Note = r.IsDBNull(r.GetOrdinal("note")) ? null : r.GetString(r.GetOrdinal("note")),
             Contact = r.IsDBNull(r.GetOrdinal("contact")) ? null : r.GetString(r.GetOrdinal("contact")),
             ContactKind = r.IsDBNull(r.GetOrdinal("contact_kind")) ? null : r.GetString(r.GetOrdinal("contact_kind")),
+            NoTranscribe = !r.IsDBNull(r.GetOrdinal("no_transcribe")) && r.GetInt64(r.GetOrdinal("no_transcribe")) != 0,
+            TranscribeMs = r.IsDBNull(r.GetOrdinal("transcribe_ms")) ? null : r.GetInt64(r.GetOrdinal("transcribe_ms")),
+            TranscribeStartedAt = r.IsDBNull(r.GetOrdinal("transcribe_started_at")) ? null : r.GetInt64(r.GetOrdinal("transcribe_started_at")),
             CreatedAt = DateTime.TryParse(r.GetString(r.GetOrdinal("created_at")), out var d) ? d : DateTime.MinValue
         };
     }

@@ -24,6 +24,7 @@ if (settingsStore.Load() is { } saved)
     cfg.Asr = saved.Asr;
     cfg.Retention = saved.Retention;
     if (saved.PageSize > 0) cfg.PageSize = saved.PageSize;
+    if (saved.TranscribeSpeed > 0) cfg.TranscribeSpeed = saved.TranscribeSpeed; // 转写速度因子（估算耗时用）
 }
 
 builder.WebHost.UseUrls($"http://{cfg.Bind}:{cfg.Port}");
@@ -461,6 +462,80 @@ api.MapPost("/transcribe/pending", () =>
     return Results.Accepted(null, new { queued = ids.Count });
 });
 
+// ---- 转写管理（弹窗）----
+
+// 转写列表：status=todo 待转写（默认）/ pending 转写中 / done 已转写 / skip 不转写 / all 全部。
+// 附各状态计数、待转写总时长与速度因子（前端估算预计耗时）；now 供前端校准「已进行」计时。
+api.MapGet("/transcribe/list", (string? status) =>
+{
+    var (todo, pending, done, error, skipped, todoDur) = db.TranscribeCounts();
+    return Results.Ok(new
+    {
+        items = db.ListForTranscribe(status ?? "todo"),
+        counts = new { todo, pending, done, error, skipped, todoDurationSec = todoDur },
+        speed = Math.Round(cfg.TranscribeSpeed, 2),
+        now = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+    });
+});
+
+// 批量入队转写：{ all: true } 一键全部未转写（自动跳过「不转写」标记），或 { ids: [...] }
+api.MapPost("/transcribe/enqueue", (TranscribeEnqueueRequest req) =>
+{
+    if (!cfg.Asr.Enabled)
+        return Results.BadRequest(new { error = "asr disabled", asr = false });
+
+    List<long> ids;
+    var skipped = 0;
+    if (req.All)
+    {
+        ids = db.GetTranscribableIds();
+    }
+    else
+    {
+        ids = [];
+        foreach (var id in (req.Ids ?? []).Distinct().Take(2000))
+        {
+            var rec = db.GetById(id);
+            // 「不转写」标记的记录批量操作一律跳过（需先取消标记）；已转写/进行中的同样忽略
+            if (rec is null || rec.NoTranscribe || rec.TranscriptStatus is "pending" or "done")
+            {
+                skipped++;
+                continue;
+            }
+            ids.Add(id);
+        }
+    }
+    foreach (var id in ids)
+    {
+        db.UpdateTranscript(id, "", "pending", null, attemptsDelta: -1_000_000); // 手动触发重置重试计数
+        queue.Enqueue(id);
+    }
+    logger.LogInformation("Transcribe enqueue: queued={Queued} skipped={Skipped} all={All}",
+        ids.Count, skipped, req.All);
+    return Results.Accepted(null, new { queued = ids.Count, skipped });
+});
+
+// 批量设置「默认不转写」标记（value=false 取消）。标记后一键/批量转写自动跳过
+api.MapPost("/transcribe/skip", (TranscribeSkipRequest req) =>
+{
+    var n = db.SetNoTranscribe((req.Ids ?? []).Distinct().Take(2000).ToList(), req.Value);
+    logger.LogInformation("No-transcribe mark: {Count} recordings -> {Value}", n, req.Value);
+    return Results.Ok(new { updated = n });
+});
+
+// 时长批量回填：前端经 <audio> 元数据读出录音时长后写回
+// （未转写录音本无时长，估算预计耗时需要它；仅允许写入空缺值，不覆盖转写得到的精确时长）
+api.MapPost("/recordings/durations", (List<DurationPatch> list) =>
+{
+    if (list.Count == 0) return Results.Ok(new { updated = 0 });
+    var n = db.SetDurations(list
+        .Where(d => d.Id > 0 && d.DurationSec > 0)
+        .Take(500)
+        .Select(d => (d.Id, Math.Clamp(d.DurationSec, 0, 86400.0 * 31)))
+        .ToList());
+    return Results.Ok(new { updated = n });
+});
+
 // 更新标题 / 备注 / 分类（传 null 不修改，空字符串清空；备注参与关键词搜索）
 api.MapPatch("/recordings/{id:long}", (long id, UpdateMetaRequest req) =>
 {
@@ -580,7 +655,8 @@ api.MapGet("/settings", () => Results.Ok(new
     tokenHint = cfg.Token.Length > 4 ? cfg.Token[..4] + "****" : "****",
     asr = cfg.Asr,
     retention = cfg.Retention,
-    pageSize = cfg.PageSize
+    pageSize = cfg.PageSize,
+    transcribeSpeed = Math.Round(cfg.TranscribeSpeed, 2)
 }));
 
 api.MapPut("/settings", (StoredSettings incoming) =>
@@ -597,8 +673,16 @@ api.MapPut("/settings", (StoredSettings incoming) =>
     cfg.Retention.MaxBytes = Math.Max(0, incoming.Retention.MaxBytes);
     cfg.PageSize = Math.Clamp(incoming.PageSize <= 0 ? 20 : incoming.PageSize, 10, 200);
 
-    // 持久化到 settings.json：重启容器配置不丢
-    try { settingsStore.Save(new StoredSettings { Asr = cfg.Asr, Retention = cfg.Retention, PageSize = cfg.PageSize }); }
+    // 持久化到 settings.json：重启容器配置不丢。
+    // TranscribeSpeed 由转写队列按实际耗时自适应维护，这里不接收前端值、只透传当前值。
+    try
+    {
+        settingsStore.Save(new StoredSettings
+        {
+            Asr = cfg.Asr, Retention = cfg.Retention,
+            PageSize = cfg.PageSize, TranscribeSpeed = cfg.TranscribeSpeed
+        });
+    }
     catch (Exception ex) { logger.LogWarning(ex, "Failed to persist settings"); }
 
     logger.LogInformation(
