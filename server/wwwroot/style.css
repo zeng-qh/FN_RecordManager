@@ -385,3 +385,16 @@ main { flex: 1; padding: 20px; max-width: 900px; width: 100%; margin: 0 auto; }
   padding: 8px 12px; margin-bottom: 12px;
 }
 .srv-status.ok { color: #6fbf73; }
+
+/* ---- 筛选栏（来源分类 / 月份）---- */
+.filters {
+  display: flex; gap: 8px; align-items: center;
+  margin-bottom: 10px; flex-wrap: wrap;
+}
+.filters select {
+  max-width: 260px; font-size: 13px;
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 7px 10px;
+}
+.filters button { font-size: 12.5px; padding: 7px 12px; }

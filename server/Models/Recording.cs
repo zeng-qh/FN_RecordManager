@@ -58,6 +58,12 @@ public class Recording
     /// <summary>用户备注（参与关键词搜索）。</summary>
     public string? Note { get; set; }
 
+    /// <summary>联系人/来源分类键：电话号码或微信联系人备注（上传时从文件名自动提取，可手动改）。</summary>
+    public string? Contact { get; set; }
+
+    /// <summary>分类类型：phone（电话号码）/ wechat（微信联系人）。</summary>
+    public string? ContactKind { get; set; }
+
     /// <summary>入库时间（ISO8601）。</summary>
     public DateTime CreatedAt { get; set; }
 }

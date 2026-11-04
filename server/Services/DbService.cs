@@ -50,6 +50,10 @@ public class DbService
             "ALTER TABLE recordings ADD COLUMN note TEXT",                      // 用户备注
             "ALTER TABLE recordings ADD COLUMN transcript_progress REAL NOT NULL DEFAULT 0",    // 转写进度 0-100
             "ALTER TABLE recordings ADD COLUMN transcript_partial TEXT",        // 转写进行中的部分文本（流式预览）
+            "ALTER TABLE recordings ADD COLUMN contact TEXT",                   // 联系人/来源分类键（电话号码或微信联系人）
+            "ALTER TABLE recordings ADD COLUMN contact_kind TEXT",              // 分类类型：phone / wechat
+            // 依赖新增列的索引必须在加列之后创建
+            "CREATE INDEX IF NOT EXISTS idx_contact ON recordings(contact)",
         })
         {
             try
@@ -92,10 +96,11 @@ public class DbService
         cmd.CommandText = """
             INSERT INTO recordings
                 (device, rel_path, file_name, stored_path, size, mtime, sha256, title,
-                 recorded_at, transcript_status, transcript_path, language, created_at)
+                 recorded_at, transcript_status, transcript_path, language, created_at,
+                 contact, contact_kind)
             VALUES
                 (@device, @rel, @fn, @sp, @size, @mtime, @sha, @title,
-                 @ra, @ts, @tp, @lang, @ca)
+                 @ra, @ts, @tp, @lang, @ca, @contact, @ckind)
             ON CONFLICT(device, sha256) DO UPDATE SET
                 rel_path = excluded.rel_path,
                 mtime   = excluded.mtime,
@@ -114,6 +119,8 @@ public class DbService
         cmd.Parameters.AddWithValue("@tp", (object?)r.TranscriptPath ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@lang", (object?)r.Language ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@ca", r.CreatedAt.ToString("o"));
+        cmd.Parameters.AddWithValue("@contact", (object?)r.Contact ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@ckind", (object?)r.ContactKind ?? DBNull.Value);
         cmd.ExecuteNonQuery();
 
         cmd.CommandText = "SELECT id FROM recordings WHERE device=@device AND sha256=@sha";
@@ -130,13 +137,13 @@ public class DbService
         return r.Read() ? ReadRecording(r) : null;
     }
 
-    public List<Recording> List(int page, int pageSize, long from, long to, string? q)
+    public List<Recording> List(int page, int pageSize, long from, long to, string? q, string? contact = null)
     {
         var items = new List<Recording>();
         using var c = OpenConn();
         using var cmd = c.CreateCommand();
 
-        var where = BuildWhere(from, to, q, cmd);
+        var where = BuildWhere(from, to, q, contact, cmd);
         cmd.CommandText = $"""
             SELECT {ListColumns} FROM recordings {where}
             ORDER BY recorded_at DESC, id DESC
@@ -149,11 +156,11 @@ public class DbService
         return items;
     }
 
-    public long Count(long from, long to, string? q)
+    public long Count(long from, long to, string? q, string? contact = null)
     {
         using var c = OpenConn();
         using var cmd = c.CreateCommand();
-        var where = BuildWhere(from, to, q, cmd);
+        var where = BuildWhere(from, to, q, contact, cmd);
         cmd.CommandText = $"SELECT COUNT(*) FROM recordings {where}";
         return Convert.ToInt64(cmd.ExecuteScalar());
     }
@@ -165,7 +172,7 @@ public class DbService
     private const string ListColumns =
         "id, device, rel_path, file_name, stored_path, size, mtime, sha256, title, recorded_at, " +
         "transcript_status, transcript_path, language, duration_sec, transcript_attempts, " +
-        "transcript_progress, transcript_partial, note, created_at";
+        "transcript_progress, transcript_partial, note, contact, contact_kind, created_at";
 
     /// <summary>
     /// 闲时调度器取数：待闲时（idle）的录音 + 转写失败未达重试上限
@@ -268,17 +275,96 @@ public class DbService
         cmd.ExecuteNonQuery();
     }
 
-    /// <summary>更新标题/备注：传 null 表示不修改，空字符串表示清空。</summary>
-    public void UpdateMeta(long id, string? title, string? note)
+    /// <summary>
+    /// 更新标题/备注/分类：传 null 表示不修改；contact 传空字符串表示清空分类（置 NULL，kind 同步清除）。
+    /// </summary>
+    public void UpdateMeta(long id, string? title, string? note, string? contact = null, string? contactKind = null)
     {
         using var c = OpenConn();
         using var cmd = c.CreateCommand();
         cmd.CommandText = """
-            UPDATE recordings SET title=COALESCE(@title, title), note=COALESCE(@note, note)
+            UPDATE recordings
+            SET title = COALESCE(@title, title),
+                note = COALESCE(@note, note),
+                contact = CASE WHEN @contact IS NULL THEN contact
+                               WHEN @contact = '' THEN NULL ELSE @contact END,
+                contact_kind = CASE WHEN @contact IS NULL THEN contact_kind
+                                    WHEN @contact = '' THEN NULL
+                                    ELSE COALESCE(@ckind, contact_kind) END
             WHERE id=@id
             """;
         cmd.Parameters.AddWithValue("@title", (object?)title ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@note", (object?)note ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@contact", (object?)contact ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@ckind", (object?)contactKind ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@id", id);
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// 分类聚合：联系人/电话号码 → 条数、总字节、最近录音时间。
+    /// 供前端「来源分类」下拉与各分类计数徽标。
+    /// </summary>
+    public List<ContactGroup> GetContacts()
+    {
+        var list = new List<ContactGroup>();
+        using var c = OpenConn();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = """
+            SELECT contact, COALESCE(MAX(contact_kind), 'unknown') AS kind,
+                   COUNT(*) AS cnt, COALESCE(SUM(size), 0) AS bytes,
+                   COALESCE(MAX(recorded_at), 0) AS lastAt
+            FROM recordings
+            WHERE contact IS NOT NULL AND contact != ''
+            GROUP BY contact ORDER BY lastAt DESC
+            """;
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+        {
+            list.Add(new ContactGroup(
+                r.GetString(0), r.GetString(1), r.GetInt64(2), r.GetInt64(3), r.GetInt64(4)));
+        }
+        return list;
+    }
+
+    /// <summary>月份聚合（按录音时间）：2026-11 → 条数。供前端「按月筛选」。</summary>
+    public List<MonthGroup> GetMonths()
+    {
+        var list = new List<MonthGroup>();
+        using var c = OpenConn();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = """
+            SELECT strftime('%Y-%m', recorded_at, 'unixepoch') AS m, COUNT(*) AS cnt
+            FROM recordings WHERE recorded_at > 0
+            GROUP BY m ORDER BY m DESC
+            """;
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+            list.Add(new MonthGroup(r.GetString(0), r.GetInt64(1)));
+        return list;
+    }
+
+    /// <summary>存量数据分类回填：找出 contact 为空的 id 与 rel_path，由调用方提取后逐条写入。</summary>
+    public List<(long Id, string RelPath)> GetContactBackfillCandidates()
+    {
+        var list = new List<(long, string)>();
+        using var c = OpenConn();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = "SELECT id, rel_path FROM recordings WHERE contact IS NULL OR contact = ''";
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+            list.Add((r.GetInt64(0), r.GetString(1)));
+        return list;
+    }
+
+    /// <summary>写回单条分类（回填用）。</summary>
+    public void SetContact(long id, string? contact, string? kind)
+    {
+        using var c = OpenConn();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = "UPDATE recordings SET contact=@ct, contact_kind=@k WHERE id=@id";
+        cmd.Parameters.AddWithValue("@ct", (object?)contact ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@k", (object?)kind ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@id", id);
         cmd.ExecuteNonQuery();
     }
@@ -335,7 +421,7 @@ public class DbService
         return v is null ? null : Convert.ToInt64(v);
     }
 
-    private static string BuildWhere(long from, long to, string? q, SqliteCommand cmd)
+    private static string BuildWhere(long from, long to, string? q, string? contact, SqliteCommand cmd)
     {
         var clauses = new List<string>();
         if (from > 0)
@@ -348,9 +434,14 @@ public class DbService
             clauses.Add("recorded_at <= @to");
             cmd.Parameters.AddWithValue("@to", to);
         }
+        if (!string.IsNullOrWhiteSpace(contact))
+        {
+            clauses.Add("contact = @contact");
+            cmd.Parameters.AddWithValue("@contact", contact);
+        }
         if (!string.IsNullOrWhiteSpace(q))
         {
-            // 关键词同时命中 文件名/标题/路径/备注/文字稿全文
+            // 关键词同时命中 文件名/标题/路径/备注/文字稿全文（模糊）
             clauses.Add("(file_name LIKE @q OR title LIKE @q OR rel_path LIKE @q OR note LIKE @q OR transcript_text LIKE @q)");
             cmd.Parameters.AddWithValue("@q", $"%{q}%");
         }
@@ -379,7 +470,15 @@ public class DbService
             TranscriptProgress = r.IsDBNull(r.GetOrdinal("transcript_progress")) ? 0 : r.GetDouble(r.GetOrdinal("transcript_progress")),
             TranscriptPartial = r.IsDBNull(r.GetOrdinal("transcript_partial")) ? null : r.GetString(r.GetOrdinal("transcript_partial")),
             Note = r.IsDBNull(r.GetOrdinal("note")) ? null : r.GetString(r.GetOrdinal("note")),
+            Contact = r.IsDBNull(r.GetOrdinal("contact")) ? null : r.GetString(r.GetOrdinal("contact")),
+            ContactKind = r.IsDBNull(r.GetOrdinal("contact_kind")) ? null : r.GetString(r.GetOrdinal("contact_kind")),
             CreatedAt = DateTime.TryParse(r.GetString(r.GetOrdinal("created_at")), out var d) ? d : DateTime.MinValue
         };
     }
 }
+
+/// <summary>分类聚合行（联系人/电话号码分组）。</summary>
+public record ContactGroup(string Contact, string Kind, long Count, long TotalBytes, long LastRecordedAt);
+
+/// <summary>月份聚合行。</summary>
+public record MonthGroup(string Month, long Count);

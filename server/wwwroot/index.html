@@ -34,6 +34,15 @@
   </div>
 
   <main>
+    <div class="filters">
+      <select id="contactFilter" title="按来源分类（电话号码 / 微信联系人）">
+        <option value="">全部来源</option>
+      </select>
+      <select id="monthFilter" title="按录音月份筛选">
+        <option value="">全部时间</option>
+      </select>
+      <button id="clearFilters" title="清空筛选" hidden>✕ 清除筛选</button>
+    </div>
     <div id="status" class="status"></div>
     <div id="timeline" class="timeline"></div>
   </main>
@@ -116,6 +125,13 @@
         <span class="idle-sep">·</span>
         <label>上限 <input id="cfgRetGb" type="number" min="0" step="1" value="0" /> GB</label>
       </div>
+      <label>每页条数
+        <select id="cfgPageSize">
+          <option value="20">20 条 / 页</option>
+          <option value="50">50 条 / 页</option>
+          <option value="100">100 条 / 页</option>
+        </select>
+      </label>
       <div class="modal-actions">
         <button id="transcribeAllBtn">转写全部未处理</button>
         <button id="testConn">测试连接</button>

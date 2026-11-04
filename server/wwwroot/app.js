@@ -7,10 +7,12 @@ const state = {
   server: localStorage.getItem(LS_SERVER) || location.origin,
   token: localStorage.getItem(LS_TOKEN) || "",
   page: 1,
-  pageSize: 50,
+  pageSize: Number(localStorage.getItem("vv_pagesize")) || 20, // 用户偏好，设置保存后服务端持久化
   loading: false,
   asrEnabled: true, // 与服务端默认开启一致（实际值以 /api/settings 回填为准）
   q: "",
+  contact: "",   // 来源分类筛选（电话号码 / 微信联系人）
+  month: "",     // 月份筛选（2026-11）
   selectMode: false,      // 多选管理模式
   selected: new Set(),    // 选中的录音 id
 };
@@ -96,6 +98,12 @@ async function loadRecordings(reset = true) {
       pageSize: state.pageSize,
       q: state.q,
     });
+    if (state.contact) params.set("contact", state.contact);
+    const [fy, fm] = state.month ? state.month.split("-").map(Number) : [0, 0];
+    if (fy) {
+      params.set("from", Math.floor(new Date(fy, fm - 1, 1).getTime() / 1000));
+      params.set("to", Math.floor(new Date(fy, fm, 1).getTime() / 1000) - 1); // 月末 23:59:59
+    }
     const res = await api(`/api/recordings?${params}`);
     const data = await res.json();
     renderItems(data.items || []);
@@ -858,6 +866,11 @@ async function refreshSettingsForm() {
     $("#cfgRetDays").value = d.retention?.days ?? 0;
     const gb = d.retention?.maxBytes ?? 0;
     $("#cfgRetGb").value = gb > 0 ? Math.max(1, Math.round(gb / (1024 ** 3))) : 0;
+    if (d.pageSize) {
+      state.pageSize = d.pageSize; // 以服务端持久化值为准
+      localStorage.setItem("vv_pagesize", String(d.pageSize));
+    }
+    $("#cfgPageSize").value = String(state.pageSize);
     syncIdleWindowBox();
   } catch (e) {}
 }
@@ -914,6 +927,7 @@ async function saveSettings() {
       days: Math.max(0, Number($("#cfgRetDays").value) || 0),
       maxBytes: Math.round(retGb * 1024 ** 3),
     },
+    pageSize: Math.max(20, Math.min(100, Number($("#cfgPageSize").value) || 20)),
   };
   try {
     const res = await api("/api/settings", {
@@ -927,6 +941,9 @@ async function saveSettings() {
       return; // 保存失败：保持弹窗打开，修正后可直接重试
     }
     state.asrEnabled = body.asr.enabled;
+    // 每页条数：服务端持久化（settings.json）+ 本地缓存双保险
+    state.pageSize = body.pageSize;
+    localStorage.setItem("vv_pagesize", String(state.pageSize));
   } catch (err) {
     if (err.message === "unauthorized") {
       setStatus("令牌无效：请核对「访问令牌」与服务端 VAULT_TOKEN 一致后再保存。");
@@ -1060,6 +1077,55 @@ $("#settingsModal").addEventListener("click", (e) => {
   if (e.target.id === "settingsModal") closeSettings();
 });
 
+// ---- 筛选器（来源分类 / 月份）----
+async function loadFilters() {
+  try {
+    const cRes = await api("/api/contacts");
+    if (cRes.ok) {
+      const d = await cRes.json();
+      const sel = $("#contactFilter");
+      sel.innerHTML = '<option value="">全部来源</option>' +
+        (d.items || []).map((c) => {
+          const icon = c.kind === "phone" ? "📞" : "💬";
+          return `<option value="${escapeHtml(c.contact)}">${icon} ${escapeHtml(c.contact)}（${c.count}）</option>`;
+        }).join("");
+      sel.value = state.contact;
+    }
+    const mRes = await api("/api/months");
+    if (mRes.ok) {
+      const d = await mRes.json();
+      const sel = $("#monthFilter");
+      sel.innerHTML = '<option value="">全部时间</option>' +
+        (d.items || []).map((m) => `<option value="${m.month}">${m.month}（${m.count}）</option>`).join("");
+      sel.value = state.month;
+    }
+  } catch (e) { /* 筛选器加载失败不阻塞列表 */ }
+  syncClearBtn();
+}
+
+function syncClearBtn() {
+  $("#clearFilters").hidden = !state.contact && !state.month;
+}
+
+$("#contactFilter").onchange = (e) => {
+  state.contact = e.target.value;
+  syncClearBtn();
+  loadRecordings(true);
+};
+$("#monthFilter").onchange = (e) => {
+  state.month = e.target.value;
+  syncClearBtn();
+  loadRecordings(true);
+};
+$("#clearFilters").onclick = () => {
+  state.contact = "";
+  state.month = "";
+  $("#contactFilter").value = "";
+  $("#monthFilter").value = "";
+  syncClearBtn();
+  loadRecordings(true);
+};
+
 // ---- 初始化 ----
 (async function init() {
   if (!state.token) {
@@ -1069,5 +1135,6 @@ $("#settingsModal").addEventListener("click", (e) => {
   try {
     await refreshSettingsForm();
   } catch (e) {}
+  loadFilters();
   loadRecordings(true);
 })();

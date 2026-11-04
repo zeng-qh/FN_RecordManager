@@ -16,12 +16,13 @@ var cfg = new VaultConfig();
 builder.Configuration.Bind(cfg);
 cfg.DataDir = Path.GetFullPath(cfg.DataDir);
 
-// 网页端设置持久化：settings.json 存在时覆盖 ASR/保留策略配置（网页端保存 > 部署默认值）
+// 网页端设置持久化：settings.json 存在时覆盖 ASR/保留策略/分页配置（网页端保存 > 部署默认值）
 var settingsStore = new SettingsStore(cfg.DataDir);
 if (settingsStore.Load() is { } saved)
 {
     cfg.Asr = saved.Asr;
     cfg.Retention = saved.Retention;
+    if (saved.PageSize > 0) cfg.PageSize = saved.PageSize;
 }
 
 builder.WebHost.UseUrls($"http://{cfg.Bind}:{cfg.Port}");
@@ -132,6 +133,24 @@ try
     }
 }
 catch (Exception ex) { logger.LogWarning(ex, "Orphan transcript cleanup failed"); }
+
+// 启动时存量数据分类回填：contact 为空的记录按 relPath 提取（幂等，一次完成）
+try
+{
+    var candidates = db.GetContactBackfillCandidates();
+    if (candidates.Count > 0)
+    {
+        var filled = 0;
+        foreach (var (id, rel) in candidates)
+        {
+            var (ct, kind) = ContactExtractor.Extract(rel);
+            if (ct is not null) { db.SetContact(id, ct, kind); filled++; }
+            else db.SetContact(id, null, null); // 置空串避免反复扫描（NULL 会再次成为候选）
+        }
+        logger.LogInformation("Contact backfill: {Filled}/{Total} recordings classified", filled, candidates.Count);
+    }
+}
+catch (Exception ex) { logger.LogWarning(ex, "Contact backfill failed"); }
 
 api.MapGet("/health", () =>
 {
@@ -293,13 +312,26 @@ api.MapGet("/stats", () =>
     });
 });
 
-// 录音列表（分页 + 时间范围 + 关键词）
-api.MapGet("/recordings", (int page = 1, int pageSize = 50, long from = 0, long to = 0, string? q = null) =>
+// 来源分类聚合：联系人/电话号码 → 条数（前端分类下拉）
+api.MapGet("/contacts", () => Results.Ok(new
+{
+    items = db.GetContacts()
+}));
+
+// 月份聚合（按录音时间）：2026-11 → 条数（前端按月筛选下拉）
+api.MapGet("/months", () => Results.Ok(new
+{
+    items = db.GetMonths()
+}));
+
+// 录音列表（分页 + 时间范围 + 关键词 + 来源分类）
+api.MapGet("/recordings", (int page = 1, int pageSize = 50, long from = 0, long to = 0,
+    string? q = null, string? contact = null) =>
 {
     page = Math.Max(1, page);
     pageSize = Math.Clamp(pageSize, 1, 200);
-    var items = db.List(page, pageSize, from, to, q);
-    var total = db.Count(from, to, q);
+    var items = db.List(page, pageSize, from, to, q, contact);
+    var total = db.Count(from, to, q, contact);
     return Results.Ok(new
     {
         page,
@@ -397,12 +429,18 @@ api.MapPost("/transcribe/pending", () =>
     return Results.Accepted(null, new { queued = ids.Count });
 });
 
-// 更新标题 / 备注（传 null 不修改，空字符串清空；备注参与关键词搜索）
+// 更新标题 / 备注 / 分类（传 null 不修改，空字符串清空；备注参与关键词搜索）
 api.MapPatch("/recordings/{id:long}", (long id, UpdateMetaRequest req) =>
 {
     var rec = db.GetById(id);
     if (rec is null) return Results.NotFound(new { error = "not found" });
-    db.UpdateMeta(id, req.Title, req.Note);
+
+    // 手动设置分类时推断 kind：纯数字 → 电话，否则微信联系人
+    string? contact = req.Contact, kind = null;
+    if (!string.IsNullOrWhiteSpace(contact))
+        kind = contact.All(char.IsDigit) ? "phone" : "wechat";
+
+    db.UpdateMeta(id, req.Title, req.Note, contact, kind);
     return Results.Ok(db.GetById(id));
 });
 
@@ -509,7 +547,8 @@ api.MapGet("/settings", () => Results.Ok(new
 {
     tokenHint = cfg.Token.Length > 4 ? cfg.Token[..4] + "****" : "****",
     asr = cfg.Asr,
-    retention = cfg.Retention
+    retention = cfg.Retention,
+    pageSize = cfg.PageSize
 }));
 
 api.MapPut("/settings", (StoredSettings incoming) =>
@@ -524,21 +563,22 @@ api.MapPut("/settings", (StoredSettings incoming) =>
 
     cfg.Retention.Days = Math.Clamp(incoming.Retention.Days, 0, 36500);
     cfg.Retention.MaxBytes = Math.Max(0, incoming.Retention.MaxBytes);
+    cfg.PageSize = Math.Clamp(incoming.PageSize <= 0 ? 20 : incoming.PageSize, 10, 200);
 
     // 持久化到 settings.json：重启容器配置不丢
-    try { settingsStore.Save(new StoredSettings { Asr = cfg.Asr, Retention = cfg.Retention }); }
+    try { settingsStore.Save(new StoredSettings { Asr = cfg.Asr, Retention = cfg.Retention, PageSize = cfg.PageSize }); }
     catch (Exception ex) { logger.LogWarning(ex, "Failed to persist settings"); }
 
     logger.LogInformation(
-        "Settings updated: asr={Enabled}, mode={Mode}, idle={S}-{E}, retentionDays={D}, maxBytes={M}",
+        "Settings updated: asr={Enabled}, mode={Mode}, idle={S}-{E}, retentionDays={D}, maxBytes={M}, pageSize={P}",
         cfg.Asr.Enabled, cfg.Asr.Mode, cfg.Asr.IdleStartHour, cfg.Asr.IdleEndHour,
-        cfg.Retention.Days, cfg.Retention.MaxBytes);
+        cfg.Retention.Days, cfg.Retention.MaxBytes, cfg.PageSize);
 
     // 保存后立即生效：闲时积压巡检 + 保留策略清理各跑一次
     idle.TriggerNow();
     retention.TriggerNow();
 
-    return Results.Ok(new { asr = cfg.Asr, retention = cfg.Retention });
+    return Results.Ok(new { asr = cfg.Asr, retention = cfg.Retention, pageSize = cfg.PageSize });
 });
 
 /// <summary>将小时裁剪到 [0,23] 合法范围。</summary>
@@ -567,6 +607,9 @@ async Task<(long Id, string Sha)> CompleteRecordingAsync(
         Title = Path.GetFileName(relPath),
         RecordedAt = recordedAt,
         TranscriptStatus = "none",
+        // 来源分类：从原始路径自动提取（电话号码 / 微信联系人），可后续手动改
+        Contact = ContactExtractor.Extract(relPath).Contact,
+        ContactKind = ContactExtractor.Extract(relPath).Kind,
         CreatedAt = DateTime.UtcNow
     };
     var id = db.Upsert(rec);

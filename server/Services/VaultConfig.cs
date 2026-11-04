@@ -97,4 +97,7 @@ public class VaultConfig
     public AsrConfig Asr { get; set; } = new();
 
     public RetentionConfig Retention { get; set; } = new();
+
+    /// <summary>列表每页条数（用户偏好，网页端设置持久化到 settings.json）。</summary>
+    public int PageSize { get; set; } = 20;
 }

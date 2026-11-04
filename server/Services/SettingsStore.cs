@@ -8,6 +8,9 @@ public class StoredSettings
 {
     public AsrConfig Asr { get; set; } = new();
     public RetentionConfig Retention { get; set; } = new();
+
+    /// <summary>列表每页条数（用户偏好，重启不丢）。合法值钳制 10-200。</summary>
+    public int PageSize { get; set; } = 20;
 }
 
 /// <summary>
