@@ -108,11 +108,12 @@ public class DbService
 
     /// <summary>
     /// 批量探测已存在的文件哈希（不限设备）：网页端上传前预校验用，
-    /// 命中即「秒传」跳过上传。返回库中实际存在的 sha 子集。
+    /// 命中即「秒传」跳过上传。返回库中实际存在的 (id, sha)，
+    /// id 供秒传后按原记录回填时长（该记录可能尚无时长）。
     /// </summary>
-    public List<string> ExistingShas(List<string> shas)
+    public List<(long Id, string Sha)> ExistingShas(List<string> shas)
     {
-        var found = new List<string>();
+        var found = new List<(long, string)>();
         if (shas.Count == 0) return found;
         using var c = OpenConn();
         using var cmd = c.CreateCommand();
@@ -122,9 +123,9 @@ public class DbService
             names.Add($"@s{i}");
             cmd.Parameters.AddWithValue($"@s{i}", shas[i]);
         }
-        cmd.CommandText = $"SELECT DISTINCT sha256 FROM recordings WHERE sha256 IN ({string.Join(",", names)})";
+        cmd.CommandText = $"SELECT id, sha256 FROM recordings WHERE sha256 IN ({string.Join(",", names)})";
         using var r = cmd.ExecuteReader();
-        while (r.Read()) found.Add(r.GetString(0));
+        while (r.Read()) found.Add((r.GetInt64(0), r.GetString(1)));
         return found;
     }
 

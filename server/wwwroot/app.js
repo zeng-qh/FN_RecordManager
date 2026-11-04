@@ -677,7 +677,8 @@ async function sha256Hex(file) {
   return [...state].map((x) => (x >>> 0).toString(16).padStart(8, "0")).join("");
 }
 
-// 秒传探测：命中（库内已有同哈希文件）返回 true
+// 秒传探测：命中（库内已有同哈希文件）返回 { id, sha }，未命中/失败返回 null。
+// id 供秒传后对原记录做时长兜底回填（原记录可能尚无时长，影响预计耗时估算）。
 async function serverHasSha(sha) {
   try {
     const res = await api("/api/upload/exists", {
@@ -685,11 +686,12 @@ async function serverHasSha(sha) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify([sha]),
     });
-    if (!res.ok) return false;
+    if (!res.ok) return null;
     const d = await res.json();
-    return (d.existing || []).some((s) => s.toLowerCase() === sha);
+    const hit = (d.existing || []).find((x) => (x.sha || "").toLowerCase() === sha);
+    return hit ? { id: hit.id, sha: hit.sha } : null;
   } catch {
-    return false; // 探测失败不阻塞上传，走正常流程
+    return null; // 探测失败不阻塞上传，走正常流程
   }
 }
 
@@ -781,6 +783,24 @@ function setItemState(item, cls, text) {
   item.label.textContent = text;
 }
 
+// 浏览器元数据读时长并回填服务端（服务端只填空缺值，不覆盖转写得到的精确时长）。
+// 秒传命中 / 正常上传完成 / dedup 去重命中三条路径共用；用完即回收 objectURL。
+function probeAndBackfill(file, id) {
+  if (!id) return;
+  const url = URL.createObjectURL(file);
+  probeFileDuration(url)
+    .then((dur) => {
+      URL.revokeObjectURL(url);
+      if (dur <= 0) return;
+      return api("/api/recordings/durations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify([{ id, durationSec: Math.round(dur * 10) / 10 }]),
+      });
+    })
+    .catch(() => URL.revokeObjectURL(url));
+}
+
 async function runUploadItem(item) {
   try {
     setItemState(item, "uploading", "校验中…");
@@ -788,12 +808,14 @@ async function runUploadItem(item) {
 
     // 秒传预校验：本地算 SHA-256 → 服务端已存在则直接跳过上传
     const sha = await sha256Hex(f);
-    if (sha && (await serverHasSha(sha))) {
+    const hit = sha ? await serverHasSha(sha) : null;
+    if (hit) {
       item.fill.style.width = "100%";
       setItemState(item, "done", "⚡ 秒传（服务器已有相同文件）");
       setStatus(`秒传：${f.name}（服务器已有，未重复上传）`);
       maybeFinishUploads();
       loadRecordings(true);
+      probeAndBackfill(f, hit.id); // 原记录时长兜底回填
       return;
     }
 
@@ -851,16 +873,7 @@ async function runUploadItem(item) {
     loadRecordings(true);
     // 异步补写录音时长（浏览器元数据读出，供转写「预计耗时」估算；
     // 服务端只回填空缺值，不会覆盖转写得到的精确时长）
-    probeFileDuration(URL.createObjectURL(f))
-      .then((dur) => {
-        if (dur <= 0) return;
-        return api("/api/recordings/durations", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify([{ id: comp.id, durationSec: Math.round(dur * 10) / 10 }]),
-        });
-      })
-      .catch(() => {});
+    probeAndBackfill(f, comp.id);
   } catch (err) {
     setItemState(item, "failed", "");
     const retry = el("button", "u-retry", "续传");
@@ -1545,7 +1558,9 @@ function syncTBatch() {
   const est = tState.speed > 0 ? dur / tState.speed : 0;
   $("#tBatchInfo").innerHTML =
     `已选 <b>${tState.selected.size}</b> 条 · 总时长 <b>${fmtDuration(dur) || "—"}</b>` +
-    (est > 1 ? ` · 预计约 <b>${fmtDuration(est)}</b>` : " · 预计耗时需先探测时长");
+    (dur > 0
+      ? (est > 1 ? ` · 预计约 <b>${fmtDuration(est)}</b>` : " · 预计耗时不足 1 秒")
+      : " · 预计耗时需先探测时长");
 }
 
 async function tEnqueue(ids, total = ids.length) {
@@ -1680,10 +1695,10 @@ $("#tBatchCancel").onclick = () => {
   renderTranscribe();
 };
 $("#tBatchAll").onclick = () => {
-  // 全选当前过滤后的可见条目
+  // 全选当前过滤后的可见条目（时长口径与单选/组勾选一致：有声时长优先）
   tState.items.filter(tMatch).forEach((it) => {
     tState.selected.add(it.id);
-    tState.selDuration.set(it.id, it.durationSec || 0);
+    tState.selDuration.set(it.id, it.speechSec || it.durationSec || 0);
   });
   renderTranscribe();
 };

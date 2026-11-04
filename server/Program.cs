@@ -257,11 +257,15 @@ api.MapPost("/upload", async (HttpContext ctx) =>
 
 // 秒传预校验：客户端上传前先本地算 SHA-256，命中（库内已有同哈希文件，不限设备）
 // 则直接跳过上传。仅做探测不建记录——同内容文件在库中必有对应条目。
+// 返回 (id, sha)：id 供秒传后对原记录做时长兜底回填。
 api.MapPost("/upload/exists", (List<string> shas) =>
 {
     var list = shas.Where(s => !string.IsNullOrWhiteSpace(s))
         .Select(s => s.ToLowerInvariant()).Distinct().Take(1000).ToList();
-    return Results.Ok(new { existing = db.ExistingShas(list) });
+    return Results.Ok(new
+    {
+        existing = db.ExistingShas(list).Select(x => new { id = x.Id, sha = x.Sha.ToLowerInvariant() })
+    });
 });
 
 api.MapPost("/upload/init", (UploadInitRequest req) =>
