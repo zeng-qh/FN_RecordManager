@@ -147,6 +147,30 @@ main { flex: 1; padding: 20px; max-width: 900px; width: 100%; margin: 0 auto; }
   border: 1px solid var(--danger); border-radius: 8px; background: transparent; color: var(--danger);
 }
 
+/* ---- 上传完成：对钩描边动画（播完由 JS 自动关闭弹窗） ---- */
+.upload-done {
+  position: absolute; inset: 0; z-index: 5;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+  background: var(--panel); border-radius: 16px;
+}
+.done-check {
+  width: 76px; height: 76px;
+  filter: drop-shadow(0 4px 14px rgba(46, 160, 67, 0.35));
+}
+.done-circle {
+  stroke: var(--accent-2); stroke-width: 3;
+  stroke-dasharray: 151; stroke-dashoffset: 151;
+  animation: vv-draw 0.45s ease-out forwards;
+}
+.done-tick {
+  stroke: var(--accent-2); stroke-width: 4; stroke-linecap: round; stroke-linejoin: round;
+  stroke-dasharray: 36; stroke-dashoffset: 36;
+  animation: vv-draw 0.3s ease-out 0.4s forwards;
+}
+.done-text { font-size: 14px; color: var(--text); opacity: 0; animation: vv-fade 0.3s ease 0.65s forwards; }
+@keyframes vv-draw { to { stroke-dashoffset: 0; } }
+@keyframes vv-fade { to { opacity: 1; } }
+
 .item .ops { display: flex; gap: 6px; flex-shrink: 0; }
 .item .ops button {
   background: var(--panel-2); border: 1px solid var(--border);
@@ -180,6 +204,7 @@ main { flex: 1; padding: 20px; max-width: 900px; width: 100%; margin: 0 auto; }
 .modal-card {
   background: var(--panel); border: 1px solid var(--border);
   border-radius: 16px; padding: 24px; width: 380px; max-width: 92vw;
+  position: relative; /* 上传完成动画覆盖层的定位基准 */
 }
 .modal-card h2 { margin: 0 0 16px; font-size: 18px; }
 .modal-card h3 { font-size: 14px; margin: 18px 0 8px; color: var(--muted); }

@@ -577,10 +577,36 @@ async function triggerTranscribe(id) {
 const CHUNK_SIZE = 512 * 1024;
 
 function openUpload() {
+  $("#uploadDone").hidden = true; // 复位完成动画层
   $("#uploadModal").hidden = false;
 }
 function closeUpload() {
   $("#uploadModal").hidden = true; // 仅隐藏 UI，后台队列继续跑
+  clearUploadDoneTimers();
+  $("#uploadDone").hidden = true;
+}
+
+// ---- 上传完成动画：全部成功后对钩描边 → 自动关闭弹窗 ----
+let uploadDoneTimers = [];
+function clearUploadDoneTimers() {
+  uploadDoneTimers.forEach(clearTimeout);
+  uploadDoneTimers = [];
+}
+
+// 队列里没有进行中任务、且无失败项（至少一条成功）时：播对钩动画并自动关窗。
+// 有失败项时保持弹窗打开，保留「续传」入口；显示前二次确认，防止刚加的新文件被打断。
+function maybeFinishUploads() {
+  if (!uploadQueue.length) return;
+  if (uploadQueue.some((it) => it.status === "pending" || it.status === "uploading")) return;
+  if (uploadQueue.some((it) => it.status === "failed")) return;
+  clearUploadDoneTimers();
+  uploadDoneTimers.push(setTimeout(() => {
+    if (uploadQueue.some((it) => it.status !== "done")) return;
+    const done = $("#uploadDone");
+    if (!done || $("#uploadModal").hidden) return;
+    done.hidden = false; // display 切换会重置并重播 CSS 描边动画
+    uploadDoneTimers.push(setTimeout(() => closeUpload(), 1400));
+  }, 600));
 }
 
 $("#uploadBtn").onclick = openUpload;
@@ -684,6 +710,7 @@ async function runUploadItem(item) {
       ? "✓ 已在服务器（去重跳过）"
       : "✓ 已上传" + (received.size ? "（断点续传完成）" : ""));
     setStatus(comp.dedup ? `服务器已有：${f.name}（已去重，未重复存储）` : `已上传：${f.name}`);
+    maybeFinishUploads(); // 全部完成时播对钩动画并自动关窗
     loadRecordings(true);
   } catch (err) {
     setItemState(item, "failed", "");

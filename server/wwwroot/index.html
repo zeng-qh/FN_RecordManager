@@ -68,6 +68,14 @@
       <div class="modal-actions">
         <button id="closeUpload">关闭</button>
       </div>
+      <!-- 全部上传完成：对钩描边动画覆盖层（播完自动关闭弹窗） -->
+      <div id="uploadDone" class="upload-done" hidden>
+        <svg viewBox="0 0 52 52" class="done-check" aria-hidden="true">
+          <circle class="done-circle" cx="26" cy="26" r="24" fill="none"/>
+          <path class="done-tick" fill="none" d="M14 27l8 8 16-16"/>
+        </svg>
+        <div class="done-text">上传完成</div>
+      </div>
     </div>
   </div>
 
