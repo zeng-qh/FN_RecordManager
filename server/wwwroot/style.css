@@ -115,6 +115,10 @@ main { flex: 1; padding: 20px; max-width: 900px; width: 100%; margin: 0 auto; }
   background: var(--panel-2);
 }
 .idle-hint { font-size: 12px; color: var(--muted); margin-bottom: 8px; line-height: 1.5; }
+/* 说话人分段：边车声纹模型就绪状态提示 */
+.diarize-hint { font-size: 12px; margin-left: 6px; }
+.diarize-ok { color: var(--ok, #2e9e5b); }
+.diarize-warn { color: var(--warn, #c47f17); }
 .idle-range { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .idle-range label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
 .idle-range input[type="number"] {

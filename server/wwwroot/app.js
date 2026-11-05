@@ -1087,6 +1087,13 @@ async function refreshSettingsForm() {
     $("#cfgAsrEndpoint").value = d.asr?.endpoint || "";
     $("#cfgAsrModel").value = d.asr?.model || "small";
     $("#cfgAsrDiarize").checked = !!(d.asr && d.asr.speakerDiarization);
+    // 说话人分段依赖边车声纹模型：未就绪时提示勾选无效，避免「勾了没效果」的困惑
+    const dHint = $("#cfgAsrDiarizeHint");
+    if (dHint) {
+      const ok = !!d.diarizeReady;
+      dHint.textContent = ok ? "✓ 声纹模型已就绪" : "⚠ 边车未安装声纹模型（勾选无效）";
+      dHint.className = ok ? "diarize-ok" : "diarize-warn";
+    }
     $("#cfgRetDays").value = d.retention?.days ?? 0;
     const gb = d.retention?.maxBytes ?? 0;
     $("#cfgRetGb").value = gb > 0 ? Math.max(1, Math.round(gb / (1024 ** 3))) : 0;

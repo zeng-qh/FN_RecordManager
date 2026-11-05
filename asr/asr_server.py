@@ -6,6 +6,7 @@ VoiceVault 本地语音转写边车（ASR）
 
 端点：
   GET  /health
+      → { "status": "ok", "diarize": true|false }  diarize=声纹模型是否就绪
   POST /transcribe            同步转写（兼容旧客户端，长连接等完整结果）
       multipart: file=音频, model=模型规模, diarize=bool
       → { "text": "...", "segments": [{start,end,text,speaker?}], "language": "zh" }
@@ -17,6 +18,16 @@ VoiceVault 本地语音转写边车（ASR）
           "partial": "已转出的部分文本", "language": "zh",
           "segments": [...], "text": "...", "error": "..." }
 
+说话人分段（diarize=true 时）：
+  对每个转写段用 3D-Speaker CAM++ 声纹模型提取 192 维 embedding，
+  再做凝聚聚类（平均链接 + 余弦相似度），按各说话人首次发言顺序标注
+  「说话人N」。模型缺失时优雅降级：不输出 speaker 字段（不再给出
+  按停顿猜测的虚假编号）。模型文件默认找 ./models/campplus.onnx，
+  可用环境变量覆盖：
+    ASR_DIARIZE_MODEL        声纹模型 onnx 路径
+    ASR_DIARIZE_THRESHOLD    聚类合并阈值（同人余弦越高，默认 0.65）
+    ASR_DIARIZE_MAX_SPEAKERS 说话人数封顶，超出强制合并最相似簇（默认 8）
+
 运行：
   pip install -r requirements.txt
   python asr_server.py --host 0.0.0.0 --port 8000
@@ -24,7 +35,7 @@ VoiceVault 本地语音转写边车（ASR）
   docker build -t voicvault-asr . && docker run -p 8000:8000 -v $PWD/models:/root/.cache voicvault-asr
 """
 import argparse
-import av  # faster-whisper 依赖 PyAV；此处用于读取音频容器真实时长
+import av  # faster-whisper 依赖 PyAV；此处用于读取音频容器真实时长/解码声纹样本
 import os
 import tempfile
 import threading
@@ -86,9 +97,169 @@ def get_model(model_size: str):
     return model
 
 
+# ---- 说话人分段（声纹 embedding + 聚类）----
+# 声纹模型（3D-Speaker CAM++，192 维，27MB）为可选项：文件缺失时 diarize
+# 优雅降级为「不标注说话人」，转写本身不受影响。
+_speaker_extractor = None
+_speaker_extractor_lock = threading.Lock()
+
+# 模型路径解析顺序：环境变量 → 脚本目录 models/ → /app/models/（Docker 内）
+_DIARIZE_MODEL_CANDIDATES = [
+    os.environ.get("ASR_DIARIZE_MODEL") or "",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "campplus.onnx"),
+    "/app/models/campplus.onnx",
+]
+_DIARIZE_THRESHOLD = float(os.environ.get("ASR_DIARIZE_THRESHOLD", "0.42"))
+_DIARIZE_MAX_SPEAKERS = int(os.environ.get("ASR_DIARIZE_MAX_SPEAKERS", "8"))
+# 单段时长下限：过短（感叹词/抢话）的段声纹不可靠，跳过后继承前段标签
+_DIARIZE_MIN_SEG_SEC = 0.8
+# 解码音频上限（秒）：声纹分段需整条解码进内存，超长录音不标注（转写不受影响）
+_DIARIZE_MAX_AUDIO_SEC = 6 * 3600
+
+
+def _diarize_model_path() -> str:
+    for p in _DIARIZE_MODEL_CANDIDATES:
+        if p and os.path.isfile(p) and os.path.getsize(p) > 1_000_000:
+            return p
+    return ""
+
+
+def _diarize_ready() -> bool:
+    """声纹模型是否就绪（文件存在即视为就绪，实际加载失败时再降级）。"""
+    try:
+        import sherpa_onnx  # noqa: F401  依赖可选，未安装视为不就绪
+
+        return bool(_diarize_model_path())
+    except ImportError:
+        return False
+
+
+def _get_speaker_extractor():
+    """懒加载声纹 embedding 模型；不可用返回 None（调用方降级）。"""
+    global _speaker_extractor
+    if _speaker_extractor is not None:
+        return _speaker_extractor
+    path = _diarize_model_path()
+    if not path:
+        return None
+    with _speaker_extractor_lock:
+        if _speaker_extractor is None:
+            try:
+                import sherpa_onnx
+
+                config = sherpa_onnx.SpeakerEmbeddingExtractorConfig()
+                config.model = path
+                config.num_threads = 2
+                _speaker_extractor = sherpa_onnx.SpeakerEmbeddingExtractor(config)
+                print(f"[asr] diarization model loaded: {path}", flush=True)
+            except Exception:
+                traceback.print_exc()
+                return None
+    return _speaker_extractor
+
+
+def _decode_16k_mono_int16(path: str):
+    """解码音频为 16k 单声道 int16 一维数组（声纹分段用）。"""
+    import numpy as np
+
+    container = av.open(path)
+    resampler = av.AudioResampler(format="s16", layout="mono", rate=16000)
+    chunks = []
+    for frame in container.decode(container.streams.audio[0]):
+        for rf in resampler.resample(frame):
+            chunks.append(rf.to_ndarray().reshape(-1))
+    if not chunks:
+        return np.zeros(0, dtype=np.int16)
+    return np.concatenate(chunks).astype(np.int16)
+
+
+def _cluster_embeddings(embs, threshold: float, max_speakers: int):
+    """凝聚聚类（平均链接 + 余弦相似度）：反复合并相似度最高的两簇，
+    直到最高相似度低于阈值；簇数超过 max_speakers 时强制合并保底。
+    收尾把碎簇（不足 min_keep 段的噪声簇）并入最相似的相邻簇，
+    避免出现「说话人17（1段）」这类碎片编号。
+    返回 段序 -> 簇序（簇按首次出现时间排序，0 起）。"""
+    import numpy as np
+
+    X = np.asarray(embs, dtype=np.float32)
+    X = X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-9)
+
+    def centers(gs):
+        c = np.stack([X[g].mean(0) for g in gs])
+        return c / (np.linalg.norm(c, axis=1, keepdims=True) + 1e-9)
+
+    groups = [[i] for i in range(len(X))]
+    while len(groups) > 1:
+        c = centers(groups)
+        sim = c @ c.T
+        np.fill_diagonal(sim, -2.0)
+        i, j = np.unravel_index(int(np.argmax(sim)), sim.shape)
+        if sim[i, j] < threshold and len(groups) <= max_speakers:
+            break
+        groups[i] = groups[i] + groups[j]
+        groups.pop(j)
+
+    # 碎簇归并：段数过少的簇多为信道噪声/咳嗽等非人声差异，并入最相似簇
+    min_keep = max(3, int(len(X) * 0.015))
+    while len(groups) > 1:
+        small = [k for k, g in enumerate(groups) if len(g) < min_keep]
+        if not small:
+            break
+        k = min(small, key=lambda k: len(groups[k]))
+        c = centers(groups)
+        sims = c @ c[k]
+        sims[k] = -2.0
+        j = int(np.argmax(sims))
+        groups[j] = groups[j] + groups[k]
+        groups.pop(k)
+
+    groups.sort(key=min)  # 按首次出现顺序编号（说话人1 = 最先发言者）
+    labels = {}
+    for k, g in enumerate(groups):
+        for i in g:
+            labels[i] = k
+    return labels
+
+
+def _assign_speakers(path: str, segments: list, extractor) -> None:
+    """对转写段做声纹聚类并就地写入 speaker 字段；失败静默（不影响转写结果）。"""
+    import numpy as np
+
+    audio = _decode_16k_mono_int16(path)
+    total_sec = audio.size / 16000.0
+    if total_sec > _DIARIZE_MAX_AUDIO_SEC:
+        print(f"[asr] audio too long for diarization ({total_sec:.0f}s), skip", flush=True)
+        return
+
+    # 逐段提取声纹：段过短跳过（事后继承前段标签）
+    keyed = []  # (段序, embedding)
+    for i, seg in enumerate(segments):
+        a = int(max(0.0, seg["start"]) * 16000)
+        b = int(seg["end"] * 16000)
+        if b - a < _DIARIZE_MIN_SEG_SEC * 16000:
+            continue
+        stream = extractor.create_stream()
+        stream.accept_waveform(16000, audio[a:b].astype(np.float32) / 32768.0)
+        stream.input_finished()
+        keyed.append((i, extractor.compute(stream)))
+
+    if not keyed:
+        return  # 全部段过短：不标注
+    labels = _cluster_embeddings(
+        [e for _, e in keyed], _DIARIZE_THRESHOLD, _DIARIZE_MAX_SPEAKERS)
+
+    # 有声纹的段按簇编号；过短段继承时间最近的前段（与真人对话抢话场景吻合）
+    label_by_seg = {i: labels[k] for k, (i, _) in enumerate(keyed)}
+    last = 0
+    for i, seg in enumerate(segments):
+        if i in label_by_seg:
+            last = label_by_seg[i]
+        seg["speaker"] = f"说话人{last + 1}"
+
+
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "diarize": _diarize_ready()}
 
 
 def _run_job(task_id: str, tmp_path: str, model_size: str, diarize: bool):
@@ -125,8 +296,6 @@ def _run_job(task_id: str, tmp_path: str, model_size: str, diarize: bool):
 
         out_segments = []
         partial_parts = []
-        speaker_idx = 0
-        prev_end = 0.0
         for seg in segments:  # 惰性生成器：产出一段推理一段
             seg_text = seg.text.strip()
             if zh:
@@ -136,12 +305,6 @@ def _run_job(task_id: str, tmp_path: str, model_size: str, diarize: bool):
                 "end": round(seg.end, 2),
                 "text": seg_text,
             }
-            # 简易说话人标注：仅作占位，真正分段需 pyannote（需 HF token）
-            if diarize:
-                if seg.start - prev_end > 1.5:  # 间隔较大视为换人
-                    speaker_idx += 1
-                seg_dict["speaker"] = f"说话人{speaker_idx + 1}"
-                prev_end = seg.end
             out_segments.append(seg_dict)
             if seg_text:
                 partial_parts.append(seg_text)
@@ -154,6 +317,22 @@ def _run_job(task_id: str, tmp_path: str, model_size: str, diarize: bool):
                 partial=" ".join(partial_parts),
                 language=str(info.language or ""),
             )
+
+        # 说话人分段：对已转出的段做声纹聚类（换的是声纹相似度，
+        # 不再按停顿猜人）。模型缺失/解码失败时无 speaker 字段，转写照常返回。
+        if diarize and out_segments:
+            try:
+                extractor = _get_speaker_extractor()
+                if extractor is None:
+                    print("[asr] diarization requested but model missing — "
+                          "segments without speaker labels", flush=True)
+                else:
+                    _assign_speakers(tmp_path, out_segments, extractor)
+                    n_spk = len({s["speaker"] for s in out_segments if "speaker" in s})
+                    print(f"[asr] diarization done: {n_spk} speaker(s) "
+                          f"over {len(out_segments)} segments", flush=True)
+            except Exception:
+                traceback.print_exc()  # 声纹失败不影响转写文本交付
 
         text = " ".join(s["text"] for s in out_segments)
         update(

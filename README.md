@@ -105,7 +105,7 @@ WantedBy=multi-user.target
 | `VAULT_ASR__IDLEENDHOUR` | `7` | 闲时窗口结束小时（0–23，可小于起始=跨午夜） |
 | `VAULT_ASR__ENDPOINT` | `http://localhost:8000` | ASR 边车地址 |
 | `VAULT_ASR__MODEL` | `small` | Whisper 模型规模 |
-| `VAULT_ASR__SPEAKERDIARIZATION` | `false` | 说话人分段 |
+| `VAULT_ASR__SPEAKERDIARIZATION` | `false` | 说话人分段（需边车声纹模型，见下文） |
 | `VAULT_RETENTION__DAYS` | `0` | 录音保留天数，0 = 永久 |
 | `VAULT_RETENTION__MAXBYTES` | `0` | 容量上限（字节），0 = 不限制 |
 
@@ -379,6 +379,25 @@ docker run -d --name voicvault-asr -p 8000:8000 --restart unless-stopped \
 > 环境变量亦可预设：`VAULT_ASR__MODE=Off|Realtime|Idle`、
 > `VAULT_ASR__IDLESTARTHOUR`、`VAULT_ASR__IDLEENDHOUR`（小时 0–23，可跨午夜）。
 > 网页端保存的设置持久化在 `<DataDir>/settings.json`，重启不丢、优先于环境变量。
+
+### 说话人分段（可选进阶）
+
+设置页勾选「说话人分段」后，转写结果中每段会标注「说话人N」（N 按首次
+发言顺序编号）。实现为**真实声纹聚类**：3D-Speaker CAM++ 模型提取每段
+192 维声纹 embedding → 凝聚聚类（平均链接 + 余弦相似度）→ 按时间顺序
+编号，并自动归并噪声碎簇。
+
+- **模型部署**：Docker 镜像构建时自动下载（约 27MB）；裸跑边车执行
+  `bash asr/download_models.sh` 下载到 `asr/models/campplus.onnx`。
+  模型缺失时**优雅降级**：转写正常返回但不标注说话人（不再输出猜测编号），
+  边车 `/health` 的 `diarize` 字段与设置页提示可查就绪状态。
+- **可调参数**（边车环境变量）：
+  - `ASR_DIARIZE_THRESHOLD`：聚类合并阈值，默认 `0.42`。同人对相似度
+    高于该值合并；电话/微信窄带录音同人相似度普遍仅 0.3–0.55，宽带
+    会议录音可达 0.7+。识别出人数偏多 → 调低；两人被并成一人 → 调高。
+  - `ASR_DIARIZE_MAX_SPEAKERS`：人数封顶（默认 8），超出强制合并最相似簇。
+- **局限**：免提外放/多人混音、低码率电话录音中两人声学特征重叠时可能
+  合并为一人或少量误分，属声纹分离的固有难度，可微调阈值改善。
 
 ## API 概览（Bearer Token 鉴权）
 

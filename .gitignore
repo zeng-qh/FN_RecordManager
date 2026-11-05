@@ -9,6 +9,9 @@ server/data/
 data/
 voicvault-data/
 
+# 声纹模型（体积大，Docker 构建时下载 / 本地用 asr/download_models.sh 获取）
+asr/models/*.onnx
+
 # 安装脚本（不应入库）
 dotnet-install.sh
 

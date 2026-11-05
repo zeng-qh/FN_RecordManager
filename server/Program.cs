@@ -654,13 +654,15 @@ api.MapGet("/recordings/export/zip", async (HttpContext ctx, string? ids) =>
 });
 
 // 设置（ASR / 转写时机 / 保留策略，持久化到 settings.json）
-api.MapGet("/settings", () => Results.Ok(new
+// diarizeReady：边车声纹模型是否就绪（探测缓存 5 分钟）——决定「说话人分段」勾选是否生效
+api.MapGet("/settings", async () => Results.Ok(new
 {
     tokenHint = cfg.Token.Length > 4 ? cfg.Token[..4] + "****" : "****",
     asr = cfg.Asr,
     retention = cfg.Retention,
     pageSize = cfg.PageSize,
-    transcribeSpeed = Math.Round(cfg.TranscribeSpeed, 2)
+    transcribeSpeed = Math.Round(cfg.TranscribeSpeed, 2),
+    diarizeReady = await asr.DiarizeReadyAsync()
 }));
 
 api.MapPut("/settings", (StoredSettings incoming) =>
