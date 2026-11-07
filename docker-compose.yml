@@ -4,8 +4,13 @@
 #   docker compose up -d
 #
 # ┌ 内存档位速查 ─────────────────────────────────────────────
-# │ 2GB 设备：保持下方默认（tiny 模型 + mem_limit 896m/1024m）
-# │ 4GB 设备：按注释放宽——服务端 1536m、边车 2048m、模型改 small
+# │ 2GB 设备：保持默认（tiny 模型），无需 .env 配置
+# │ 4GB 设备：.env 里加
+# │   VAULT_ASR_MODEL=small    # 中文准确率明显更好
+# │   VAULT_MEMLIMIT=1536m     # 服务端上限（防失控护栏）
+# │   ASR_MEMLIMIT=2048m       # 边车上限——small 推理峰值可到 ~1GB+，
+# │                            # 不放宽会撞 1024m 默认值被反复 OOM kill
+# │   ASR_CPUS=2.5             # 边车推理核数（留 1.5 核给系统/其他应用）
 # └───────────────────────────────────────────────────────────
 services:
   voicvault:
@@ -32,9 +37,9 @@ services:
       - VAULT_ASR__MODE=${VAULT_ASR_MODE:-Realtime}
       - VAULT_ASR__IDLESTARTHOUR=${VAULT_ASR_IDLESTARTHOUR:-22}
       - VAULT_ASR__IDLEENDHOUR=${VAULT_ASR_IDLEENDHOUR:-7}
-    # 内存硬上限：默认为 2GB 小设备保守值。
-    # 4GB 树莓派建议改 1536m（服务端常驻仅 80-150MB，上限只是防失控护栏）。
-    mem_limit: 896m
+    # 内存硬上限（防失控护栏，非实际占用）：默认 2GB 小设备保守值。
+    # 4GB 设备在 .env 设 VAULT_MEMLIMIT=1536m。
+    mem_limit: ${VAULT_MEMLIMIT:-896m}
     volumes:
       - voicvault-data:/data
     restart: unless-stopped
@@ -63,9 +68,10 @@ services:
       - MKL_NUM_THREADS=3
     volumes:
       - ./asr-models:/root/.cache  # 缓存 Whisper 模型
-    # 2GB 保守值 1024m + cpus 1.5；4GB 跑 small 建议 2048m + cpus 2.5
-    mem_limit: 1024m
-    cpus: "1.5"
+    # 2GB 默认 1024m + 1.5 核；4GB 跑 small 时在 .env 设
+    # ASR_MEMLIMIT=2048m、ASR_CPUS=2.5（small 推理峰值 ~1GB+，不放宽会被 OOM kill）
+    mem_limit: ${ASR_MEMLIMIT:-1024m}
+    cpus: "${ASR_CPUS:-1.5}"
     restart: unless-stopped
     logging:
       driver: json-file
