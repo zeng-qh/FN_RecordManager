@@ -400,14 +400,40 @@ docker run -d --name voicvault-asr -p 8000:8000 --restart unless-stopped \
   压缩，频谱声纹可能完全不可分（聚类收敛为 1 簇）。此时自动回退用
   段级基频 F0（音高）递归二分，自动确定人数 1–4：每层切分需同时满足
   双峰可分辨（`ASR_DIARIZE_F0_DPRIME`，默认 1.5）、音高差足够
-  （`ASR_DIARIZE_F0_DELTA`，默认 0.22 ≈ 中位音高比 1.25x）、占比均衡
-  （`ASR_DIARIZE_F0_MIN_RATIO`，默认 0.08，挡咳嗽/尖叫离群音高），
-  任一不满足即停——宁少分不错分。有效段 <12 或声纹正常分簇时不触发。
+  （`ASR_DIARIZE_F0_DELTA`，默认 0.22 ≈ 中位音高比 1.25x；双峰度
+  d' ≥ 2.5 时放宽到 `ASR_DIARIZE_F0_DELTA_LOOSE` 0.16，避免分段
+  波动让音高接近的两人卡门槛漏切）、占比均衡
+  （`ASR_DIARIZE_F0_MIN_RATIO`，默认 0.08，挡咳嗽/尖叫离群音高；
+  双峰度 d' ≥ 2.5 的极清晰小簇放宽到 `ASR_DIARIZE_F0_MIN_RATIO_LOOSE`
+  0.06，放行真实第三人的少量发言），任一不满足即停——宁少分不错分。
+  有效段 <12 或声纹正常分簇时不触发。
   实测校准（演示库）：2 小时两人电话录音切 2 人、三人家庭通话
   （成人×2+儿童）切 3 人、同性别低音差两人（d' 1.57）切 2 人、
   单人语音留言与歌曲维持 1 人。
 - **局限**：音高与声纹都接近（如同性别且音域重叠的多人混音）时仍可能
   合并或少量误分，属无监督分离的固有难度，可微调阈值改善。
+
+### 声纹注册（说话人认名）
+
+聚类只能给出匿名的「说话人N」；声纹注册把名字跟嗓音绑定：
+
+- **注册**：在录音详情页点文字稿上方的说话人标签 → 输名字（如「张三」）。
+  服务端取该说话人**全部转写段**的时间段，交给边车
+  `POST /speaker-embedding` 拼接提取 192 维声纹向量入库
+  （有效音频 <1 秒拒绝注册）。同名再次标注 = 追加样本加固。
+- **自动认人**：转写时边车随结果输出每个说话人簇的代表声纹（均值后
+  L2 归一化），存进文字稿 JSON。渲染/导出时服务端实时比对注册库，
+  命中则把「说话人N」显示为注册名——**注册/改名/删除即刻作用于全部
+  历史记录，无需重转**（老记录需重转过一次才有簇声纹）。
+- **防误认两道判据**：最佳相似度 ≥ `VAULT_Speaker__MatchThreshold`
+  （默认 0.75——实测电话信道下跨录音的异人相似度也能到 0.74，而同人
+  跨录音仅 0.59，同异分数重叠区只能整体拒绝，宁显匿名），且与次佳
+  档案差距 ≥ `VAULT_Speaker__MatchMargin`（默认 0.05）——歧义时拒绝
+  认名。**同记录内一对一分配**：同一录音的多个簇共享信道、彼此相似度
+  偏高（真不同人簇间 0.68–0.86），故每个档案在同一条记录内至多被一个
+  簇认领（全局降序贪心），某档案删除后其"邻居簇"不会被错误认领。
+- **管理**：设置页「声纹库」可改名（同名改名即合并档案）、删除
+  （历史记录恢复显示「说话人N」）；删除录音时其注册样本级联清理。
 
 ## API 概览（Bearer Token 鉴权）
 
@@ -422,11 +448,15 @@ docker run -d --name voicvault-asr -p 8000:8000 --restart unless-stopped \
 | GET | `/api/recordings` | 列表（分页/时间范围/关键词） |
 | GET | `/api/recordings/{id}` | 详情 |
 | PATCH | `/api/recordings/{id}` | 更新标题/备注（null 不改，空串清空；备注参与搜索） |
-| DELETE | `/api/recordings/{id}` | 删除录音（含落盘文件与文字稿） |
+| DELETE | `/api/recordings/{id}` | 删除录音（含落盘文件与文字稿；注册声纹样本级联清理） |
 | GET | `/api/recordings/{id}/file` | 音频流（支持 Range，`?token=` 等价凭证） |
-| GET | `/api/recordings/{id}/transcript` | 文字稿（未就绪返回 404 + 状态，状态含 `idle` 待闲时） |
+| GET | `/api/recordings/{id}/transcript` | 文字稿（未就绪返回 404 + 状态，状态含 `idle` 待闲时；响应实时注入注册名） |
 | GET | `/api/recordings/{id}/transcript/export` | 导出 `?format=txt\|srt`（TXT 带时间戳 / SRT 字幕） |
 | POST | `/api/recordings/{id}/transcribe` | 立即转写单条（重置重试计数，不受闲时窗口限制） |
+| GET | `/api/speakers` | 声纹库列表（档案 + 样本来源） |
+| POST | `/api/speakers` | 声纹注册 `{name, recordId, speakerLabel}`——从录音说话人标注提取声纹 |
+| PATCH | `/api/speakers/{id}` | 声纹改名（同名即合并档案） |
+| DELETE | `/api/speakers/{id}` | 删除声纹档案（历史记录恢复匿名标签） |
 | POST | `/api/transcribe/pending` | 批量转写：全部未完成录音一次性入队 |
 | GET/PUT | `/api/settings` | 读取 / 修改设置（`asr`、`retention`；PUT 落盘持久化并立即生效） |
 

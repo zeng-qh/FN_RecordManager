@@ -475,6 +475,7 @@ function renderDetailTranscript(data) {
   detailTranscriptData = data;
   detailSegEls = [];
   lastActiveSegEl = null; // 重渲染后旧元素引用失效，重置高亮跟踪
+  renderDetailSpeakers(data);
   const box = $("#dTranscript");
   box.innerHTML = "";
   if (data.language) box.appendChild(el("div", "d-lang", "识别语言：" + escapeHtml(data.language)));
@@ -499,6 +500,82 @@ function renderDetailTranscript(data) {
 
 // 播放进度 → 文字稿高亮 + 滚动跟随（仅当高亮段变化时滚动，避免抖动）
 let lastActiveSegEl = null;
+
+// ---- 说话人条（声纹注册入口）----
+// data.speakers 由服务端动态认名后返回：label=聚类标签（说话人N），
+// name=注册名（未注册为 null）。点 chip 弹出注册框：输入名字即把该
+// 说话人的全部转写段作为声纹样本注册；已注册的可再次提交追加样本。
+function renderDetailSpeakers(data) {
+  const bar = $("#dSpeakers");
+  if (!bar) return;
+  const spks = (data && data.speakers) || [];
+  if (!spks.length) { bar.hidden = true; bar.innerHTML = ""; return; }
+  bar.hidden = false;
+  bar.innerHTML = "";
+  const tip = el("span", "spk-tip", "说话人：");
+  bar.appendChild(tip);
+  for (const s of spks) {
+    const chip = el("button", "spk-chip" + (s.name ? " named" : ""));
+    chip.title = s.name
+      ? `已注册为「${s.name}」· 点击可从本条录音追加声纹样本`
+      : "点击注册声纹：标注真名后全库自动认人";
+    chip.innerHTML =
+      `<span class="spk-name">${escapeHtml(s.name || s.label)}</span>` +
+      (s.name ? `<span class="spk-sub">${escapeHtml(s.label)}</span>` : `<span class="spk-sub">📌 注册</span>`);
+    chip.onclick = () => openSpkEnroll(detailId, s.label, s.name);
+    bar.appendChild(chip);
+  }
+}
+
+let spkEnrollCtx = null; // { recordId, label } 注册弹窗当前上下文
+
+function openSpkEnroll(recordId, label, existingName) {
+  spkEnrollCtx = { recordId, label };
+  $("#spkTitle").textContent = "注册说话人";
+  $("#spkHint").textContent =
+    `把本条录音里的「${label}」标注成真名。将提取该说话人全部发言段的声纹；` +
+    (existingName ? `当前已注册为「${existingName}」，另填新名可将其归入该人。` : "注册后全库自动认人。");
+  $("#spkName").value = existingName || "";
+  $("#spkModal").hidden = false;
+  $("#spkName").focus();
+}
+
+function closeSpkModal() {
+  $("#spkModal").hidden = true;
+  spkEnrollCtx = null;
+}
+
+async function submitSpkEnroll() {
+  if (!spkEnrollCtx) return;
+  const name = $("#spkName").value.trim();
+  if (!name) { $("#spkName").focus(); return; }
+  const { recordId, label } = spkEnrollCtx;
+  const btn = $("#spkSave");
+  btn.disabled = true;
+  btn.textContent = "提取声纹中…";
+  try {
+    const res = await api("/api/speakers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, recordId, speakerLabel: label }),
+    });
+    const d = await res.json().catch(() => ({}));
+    if (res.ok) {
+      setStatus(`已注册说话人「${name}」（声纹样本 ${d.seconds ?? "—"} 秒）✓`);
+      closeSpkModal();
+      // 重新拉取：服务端按新声纹库认名，文字稿立即显示注册名
+      loadDetailTranscript(recordId);
+      loadSpeakerLib(); // 设置页列表（若打开过）同步刷新
+    } else {
+      alert("注册失败：" + (d.error || `HTTP ${res.status}`));
+    }
+  } catch (e) {
+    alert("注册失败：网络异常或服务器不可达。");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "保存";
+  }
+}
 function syncTranscriptHighlight(curSec) {
   const hit = detailSegEls.find((s) => curSec >= s.start && curSec < s.end);
   const target = hit ? hit.el : null;
@@ -1054,6 +1131,59 @@ function closeSettings() {
   $("#settingsModal").hidden = true;
 }
 
+// ---- 声纹库（设置页管理）----
+async function loadSpeakerLib() {
+  const box = $("#spkList");
+  if (!box) return;
+  try {
+    const res = await api("/api/speakers");
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const d = await res.json();
+    const items = d.items || [];
+    if (!items.length) {
+      box.innerHTML = '<div class="spk-empty">暂无注册声纹。打开任一条已转写录音，点文字稿上方的说话人标签即可注册。</div>';
+      return;
+    }
+    box.innerHTML = "";
+    for (const p of items) {
+      const row = el("div", "spk-row");
+      const sources = (p.samples || [])
+        .map((s) => (s.recordId ? `#${s.recordId}` : "外部"))
+        .join("、");
+      row.innerHTML =
+        `<span class="spk-avatar">🗣️</span>` +
+        `<span class="spk-info"><b>${escapeHtml(p.name)}</b>` +
+        `<small>${(p.samples || []).length} 个样本${sources ? " · 来自 " + escapeHtml(sources) : ""}</small></span>`;
+      const edit = el("button", "spk-act", "✏️");
+      edit.title = "改名";
+      edit.onclick = async () => {
+        const name = prompt("修改声纹名字（改名后全库记录立即按新名字显示）：", p.name);
+        if (!name || name.trim() === p.name) return;
+        const r2 = await api(`/api/speakers/${p.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: name.trim() }),
+        });
+        if (r2.ok) { setStatus(`声纹已改名：${p.name} → ${name.trim()}`); loadSpeakerLib(); }
+        else { const e2 = await r2.json().catch(() => ({})); alert("改名失败：" + (e2.error || r2.status)); }
+      };
+      const del = el("button", "spk-act", "🗑");
+      del.title = "删除（历史记录恢复显示「说话人N」）";
+      del.onclick = async () => {
+        if (!confirm(`删除声纹「${p.name}」？所有记录里该名字将恢复为「说话人N」。`)) return;
+        const r2 = await api(`/api/speakers/${p.id}`, { method: "DELETE" });
+        if (r2.ok) { setStatus(`已删除声纹「${p.name}」`); loadSpeakerLib(); }
+        else { const e2 = await r2.json().catch(() => ({})); alert("删除失败：" + (e2.error || r2.status)); }
+      };
+      row.appendChild(edit);
+      row.appendChild(del);
+      box.appendChild(row);
+    }
+  } catch (e) {
+    box.innerHTML = '<div class="spk-empty">声纹库加载失败（服务器未升级到支持声纹注册的版本？）</div>';
+  }
+}
+
 // 设置弹窗顶部：服务器状态水位（health 接口，无需敏感信息）
 async function refreshServerStatus() {
   const box = $("#srvStatus");
@@ -1074,6 +1204,7 @@ async function refreshServerStatus() {
 async function refreshSettingsForm() {
   // 服务器状态水位（磁盘 / 条数 / 占用），失败静默
   refreshServerStatus();
+  loadSpeakerLib(); // 声纹库列表（设置页常驻区块）
   // 拉取 ASR 配置回填
   try {
     const res = await api("/api/settings");
@@ -1225,6 +1356,16 @@ $("#dClose").onclick = closeDetail;
 $("#dCopy").onclick = copyTranscript;
 $("#dTranscribe").onclick = transcribeFromDetail;
 
+// 声纹注册弹窗：保存 / 取消 / 回车提交 / Esc 或点遮罩关闭
+$("#spkSave").onclick = submitSpkEnroll;
+$("#spkCancel").onclick = closeSpkModal;
+$("#spkName").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); submitSpkEnroll(); }
+});
+$("#spkModal").addEventListener("click", (e) => {
+  if (e.target.id === "spkModal") closeSpkModal();
+});
+
 // 多选管理
 $("#manageBtn").onclick = () => setSelectMode(!state.selectMode);
 $("#batchCancel").onclick = () => setSelectMode(false);
@@ -1247,7 +1388,8 @@ $("#detailModal").addEventListener("click", (e) => {
 });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
-    if (!$("#detailModal").hidden) closeDetail();
+    if (!$("#spkModal").hidden) closeSpkModal();
+    else if (!$("#detailModal").hidden) closeDetail();
     else if (!$("#tModal").hidden) closeTranscribe();
   }
 });

@@ -77,6 +77,25 @@ public class RetentionConfig
 }
 
 /// <summary>
+/// 声纹注册（说话人认名）配置。可用环境变量覆盖：
+/// VAULT_Speaker__MatchThreshold / VAULT_Speaker__MatchMargin。
+/// </summary>
+public class SpeakerConfig
+{
+    /// <summary>
+    /// 认定「同一人」的最低余弦相似度。实测校准（演示库 CAM++，电话信道）：
+    /// 同一次转写内注册簇自匹配 0.78–0.98；跨录音的异人相似度可到 0.74
+    /// （信道压缩把所有人的频谱拉近，同异分数在 0.55–0.74 重叠，其中
+    /// 连「同人跨录音」也只有 0.59 左右）——0.75 以下必然出现跨录音误认，
+    /// 故默认取 0.75（宁显匿名不认错人）。宽带同设备场景可酌情调低。
+    /// </summary>
+    public double MatchThreshold { get; set; } = 0.75;
+
+    /// <summary>与次佳档案的最小差距：最佳与次佳相差不足该值视为歧义，拒绝认名。</summary>
+    public double MatchMargin { get; set; } = 0.05;
+}
+
+/// <summary>
 /// 服务端运行配置，绑定自 appsettings.json 与环境变量（VAULT_ 前缀，嵌套用 __）。
 /// 例：VAULT_TOKEN / VAULT_DATADIR / VAULT_PORT / VAULT_ASR__MODE / VAULT_ASR__IDLESTARTHOUR。
 /// </summary>
@@ -97,6 +116,8 @@ public class VaultConfig
     public AsrConfig Asr { get; set; } = new();
 
     public RetentionConfig Retention { get; set; } = new();
+
+    public SpeakerConfig Speaker { get; set; } = new();
 
     /// <summary>列表每页条数（用户偏好，网页端设置持久化到 settings.json）。</summary>
     public int PageSize { get; set; } = 20;

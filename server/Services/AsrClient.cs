@@ -11,11 +11,24 @@ public class AsrSegment
     public string? Speaker { get; set; }
 }
 
+/// <summary>
+/// 转写结果中的一个说话人簇：label 与边车聚类编号（说话人N）对应，
+/// Embedding 为该簇代表声纹（192 维，均值后 L2 归一化）；Name 由主服务
+/// 比对声纹注册库后动态注入（转写文件本身始终存边车原始输出）。
+/// </summary>
+public class AsrSpeakerInfo
+{
+    public string Label { get; set; } = "";
+    public List<float>? Embedding { get; set; }
+    public string? Name { get; set; }
+}
+
 /// <summary>ASR 边车返回的完整结果。</summary>
 public class AsrResult
 {
     public string? Text { get; set; }
     public List<AsrSegment>? Segments { get; set; }
+    public List<AsrSpeakerInfo>? Speakers { get; set; }
     public string? Language { get; set; }
 
     /// <summary>
@@ -38,8 +51,8 @@ public class AsrClient(HttpClient http, VaultConfig cfg)
     /// <summary>边车 /transcribe-status 返回的任务状态。</summary>
     private record JobStatus(
         string? Status, double Progress, string? Partial,
-        string? Language, List<AsrSegment>? Segments, string? Text,
-        double? Duration, double? Speech, string? Error);
+        string? Language, List<AsrSegment>? Segments, List<AsrSpeakerInfo>? Speakers,
+        string? Text, double? Duration, double? Speech, string? Error);
 
     // 轮询每秒反序列化一次：选项静态缓存，避免重复构建
     private static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web);
@@ -102,6 +115,33 @@ public class AsrClient(HttpClient http, VaultConfig cfg)
     }
 
     /// <summary>
+    /// 声纹注册：把录音指定时间段发给边车提取 192 维声纹向量。
+    /// 多段时间戳（秒）由调用方从文字稿按说话人标签聚合而来。
+    /// 边车模型未就绪（503）或有效音频过短（400）时抛 HttpRequestException，
+    /// 调用方透传其错误信息给前端。
+    /// </summary>
+    public async Task<(float[] Embedding, double Seconds)> SpeakerEmbeddingAsync(
+        string audioPath, List<double[]> ranges, CancellationToken ct = default)
+    {
+        using var fileStream = File.OpenRead(audioPath);
+        using var content = new MultipartFormDataContent();
+        content.Add(new StreamContent(fileStream), "file", Path.GetFileName(audioPath));
+        content.Add(new StringContent(
+            JsonSerializer.Serialize(ranges, JsonOpts)), "ranges");
+
+        using var resp = await http.PostAsync(BaseEndpoint + "/speaker-embedding", content, ct);
+        var body = await resp.Content.ReadAsStringAsync(ct);
+        if (!resp.IsSuccessStatusCode)
+            throw new HttpRequestException(body);
+        var parsed = JsonSerializer.Deserialize<EmbeddingResponse>(body, JsonOpts);
+        if (parsed?.Embedding is not { Length: > 0 } emb)
+            throw new InvalidOperationException("asr sidecar returned empty embedding");
+        return (emb, parsed.Seconds);
+    }
+
+    private record EmbeddingResponse(float[] Embedding, double Seconds);
+
+    /// <summary>
     /// 提交异步转写任务并轮询至完成。
     /// <paramref name="taskId"/> 用录音 id（同任务重复提交即重启）；
     /// <paramref name="onProgress"/> 每次轮询回调（progress 0-100，partial 已转文本）。
@@ -143,6 +183,7 @@ public class AsrClient(HttpClient http, VaultConfig cfg)
                 {
                     Text = status.Text,
                     Segments = status.Segments,
+                    Speakers = status.Speakers,
                     Language = status.Language,
                     Duration = status.Duration,
                     Speech = status.Speech,

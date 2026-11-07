@@ -50,6 +50,28 @@ public class DbService
             """;
         cmd.ExecuteNonQuery();
 
+        // 声纹注册库：说话人档案 + 注册样本（来自录音标注）。
+        // 匹配阈值之外再存原始 192 维向量（float32 BLOB），加新样本后
+        // 历史记录无需重转即可用新索引重新认人。
+        cmd.CommandText = """
+            CREATE TABLE IF NOT EXISTS speaker_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                created_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS speaker_samples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_id INTEGER NOT NULL,
+                record_id INTEGER,
+                seg_label TEXT,
+                embedding BLOB NOT NULL,
+                created_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_speaker_samples_profile ON speaker_samples(profile_id);
+            CREATE INDEX IF NOT EXISTS idx_speaker_samples_record ON speaker_samples(record_id);
+            """;
+        cmd.ExecuteNonQuery();
+
         // 增量列迁移（已存在时静默跳过）
         foreach (var ddl in new[]
         {
@@ -619,6 +641,183 @@ public class DbService
         cmd.CommandText = "SELECT id FROM recordings ORDER BY recorded_at ASC, id ASC LIMIT 1";
         var v = cmd.ExecuteScalar();
         return v is null ? null : Convert.ToInt64(v);
+    }
+
+    // ---- 声纹注册库（speaker_profiles / speaker_samples）----
+
+    /// <summary>声纹注册样本（一行 = 从某条录音的某说话人标注提取的 192 维向量）。</summary>
+    public record SpeakerSampleRow(long Id, long ProfileId, long? RecordId, string? SegLabel, float[] Embedding, DateTime CreatedAt);
+
+    /// <summary>声纹档案聚合行：档案 + 其全部注册样本。</summary>
+    public record SpeakerProfileRow(long Id, string Name, DateTime CreatedAt, List<SpeakerSampleRow> Samples);
+
+    /// <summary>添加一条注册样本；同名档案不存在时自动创建。返回档案 id。</summary>
+    public long AddSpeakerSample(string name, long? recordId, string? segLabel, float[] embedding)
+    {
+        using var c = OpenConn();
+        using var tx = c.BeginTransaction();
+        long profileId;
+        var now = DateTime.UtcNow.ToString("o");
+        using (var q = c.CreateCommand())
+        {
+            q.Transaction = tx;
+            q.CommandText = "SELECT id FROM speaker_profiles WHERE name=@n";
+            q.Parameters.AddWithValue("@n", name);
+            var found = q.ExecuteScalar();
+            if (found is not null)
+            {
+                profileId = Convert.ToInt64(found);
+            }
+            else
+            {
+                // 复用同一命令：补齐 INSERT 所需的 @t 参数（@n 已在参数表）
+                q.Parameters.AddWithValue("@t", now);
+                q.CommandText = "INSERT INTO speaker_profiles(name, created_at) VALUES (@n, @t)";
+                q.ExecuteNonQuery();
+                profileId = Convert.ToInt64(new SqliteCommand(
+                    "SELECT last_insert_rowid()", c, tx).ExecuteScalar());
+            }
+        }
+        using var ins = c.CreateCommand();
+        ins.Transaction = tx;
+        ins.CommandText =
+            "INSERT INTO speaker_samples(profile_id, record_id, seg_label, embedding, created_at) VALUES (@p, @r, @l, @e, @t)";
+        ins.Parameters.AddWithValue("@p", profileId);
+        ins.Parameters.AddWithValue("@r", (object?)recordId ?? DBNull.Value);
+        ins.Parameters.AddWithValue("@l", (object?)segLabel ?? DBNull.Value);
+        ins.Parameters.AddWithValue("@e", FloatsToBlob(embedding));
+        ins.Parameters.AddWithValue("@t", now);
+        ins.ExecuteNonQuery();
+        tx.Commit();
+        return profileId;
+    }
+
+    /// <summary>全部声纹档案（含样本），按创建时间倒序（新注册的排前面）。</summary>
+    public List<SpeakerProfileRow> ListSpeakerProfiles()
+    {
+        var samples = new Dictionary<long, List<SpeakerSampleRow>>();
+        using (var c = OpenConn())
+        using (var cmd = c.CreateCommand())
+        {
+            cmd.CommandText = """
+                SELECT id, profile_id, record_id, seg_label, embedding, created_at
+                FROM speaker_samples ORDER BY id
+                """;
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                var pid = r.GetInt64(1);
+                var row = new SpeakerSampleRow(
+                    r.GetInt64(0), pid,
+                    r.IsDBNull(2) ? null : r.GetInt64(2),
+                    r.IsDBNull(3) ? null : r.GetString(3),
+                    BlobToFloats((byte[])r.GetValue(4)),
+                    DateTime.TryParse(r.GetString(5), out var d) ? d : DateTime.MinValue);
+                if (!samples.TryGetValue(pid, out var list))
+                    samples[pid] = list = new List<SpeakerSampleRow>();
+                list.Add(row);
+            }
+        }
+
+        var list2 = new List<SpeakerProfileRow>();
+        using (var c = OpenConn())
+        using (var cmd = c.CreateCommand())
+        {
+            cmd.CommandText = "SELECT id, name, created_at FROM speaker_profiles ORDER BY id DESC";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                var id = r.GetInt64(0);
+                list2.Add(new SpeakerProfileRow(
+                    id, r.GetString(1),
+                    DateTime.TryParse(r.GetString(2), out var d) ? d : DateTime.MinValue,
+                    samples.TryGetValue(id, out var s) ? s : new List<SpeakerSampleRow>()));
+            }
+        }
+        return list2;
+    }
+
+    /// <summary>全部 (档案 id, 姓名, 向量) 扁平索引：认人匹配用（一对多样本）。</summary>
+    public List<(long ProfileId, string Name, float[] Embedding)> GetSpeakerIndex()
+    {
+        var rows = new List<(long, string, float[])>();
+        using var c = OpenConn();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = """
+            SELECT s.profile_id, p.name, s.embedding
+            FROM speaker_samples s JOIN speaker_profiles p ON p.id = s.profile_id
+            ORDER BY s.id
+            """;
+        using var r = cmd.ExecuteReader();
+        while (r.Read())
+            rows.Add((r.GetInt64(0), r.GetString(1), BlobToFloats((byte[])r.GetValue(2))));
+        return rows;
+    }
+
+    /// <summary>声纹档案改名（级联影响所有历史记录的认名渲染，注册名即时生效）。</summary>
+    public bool RenameSpeakerProfile(long id, string name)
+    {
+        using var c = OpenConn();
+        using var cmd = c.CreateCommand();
+        // 同名档案已存在时视为合并请求：把样本迁过去再删本档案（名字唯一约束）
+        cmd.CommandText = "SELECT id FROM speaker_profiles WHERE name=@n AND id != @id";
+        cmd.Parameters.AddWithValue("@n", name);
+        cmd.Parameters.AddWithValue("@id", id);
+        var other = cmd.ExecuteScalar();
+        if (other is not null)
+        {
+            var otherId = Convert.ToInt64(other);
+            cmd.CommandText = "UPDATE speaker_samples SET profile_id=@o WHERE profile_id=@id";
+            cmd.Parameters.AddWithValue("@o", otherId);
+            cmd.ExecuteNonQuery();
+            cmd.CommandText = "DELETE FROM speaker_profiles WHERE id=@id";
+            cmd.ExecuteNonQuery();
+            return true;
+        }
+        cmd.CommandText = "UPDATE speaker_profiles SET name=@n WHERE id=@id";
+        cmd.ExecuteNonQuery();
+        return true;
+    }
+
+    /// <summary>删除声纹档案（样本级联删除）。返回是否确实删除。</summary>
+    public bool DeleteSpeakerProfile(long id)
+    {
+        using var c = OpenConn();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = "DELETE FROM speaker_samples WHERE profile_id=@id";
+        cmd.Parameters.AddWithValue("@id", id);
+        cmd.ExecuteNonQuery();
+        cmd.CommandText = "DELETE FROM speaker_profiles WHERE id=@id";
+        return cmd.ExecuteNonQuery() > 0;
+    }
+
+    /// <summary>删除录音时级联清理其注册样本（来源引用不悬空）。</summary>
+    public void DeleteSpeakerSamplesByRecord(long recordId)
+    {
+        using var c = OpenConn();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = "DELETE FROM speaker_samples WHERE record_id=@id";
+        cmd.Parameters.AddWithValue("@id", recordId);
+        cmd.ExecuteNonQuery();
+        // 顺手清掉没有任何样本的空档案（只剩名字没有声纹，无法参与匹配）
+        cmd.CommandText =
+            "DELETE FROM speaker_profiles WHERE id NOT IN (SELECT DISTINCT profile_id FROM speaker_samples)";
+        cmd.ExecuteNonQuery();
+    }
+
+    private static byte[] FloatsToBlob(float[] emb)
+    {
+        var b = new byte[emb.Length * sizeof(float)];
+        Buffer.BlockCopy(emb, 0, b, 0, b.Length);
+        return b;
+    }
+
+    private static float[] BlobToFloats(byte[] blob)
+    {
+        if (blob.Length % sizeof(float) != 0) return Array.Empty<float>();
+        var f = new float[blob.Length / sizeof(float)];
+        Buffer.BlockCopy(blob, 0, f, 0, blob.Length);
+        return f;
     }
 
     private static string BuildWhere(long from, long to, string? q, string? contact, SqliteCommand cmd)

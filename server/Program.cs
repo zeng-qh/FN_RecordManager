@@ -432,7 +432,12 @@ api.MapGet("/recordings/{id:long}/transcript", (long id) =>
         });
 
     var json = File.ReadAllText(rec.TranscriptPath);
-    return Results.Content(json, "application/json");
+    // 动态注入注册名：文件里存的始终是边车原始输出（说话人N + 簇声纹），
+    // 认名在响应时按当前注册库实时比对——注册/改名/删除即刻生效于全部历史记录
+    var result = JsonSerializer.Deserialize<AsrResult>(json, jsonOptions);
+    if (result is null) return Results.Content(json, "application/json");
+    ApplySpeakerNames(result, db, cfg);
+    return Results.Json(result, jsonOptions);
 });
 
 // 触发转写（仅当 ASR 启用；任务进后台队列串行执行）
@@ -567,6 +572,7 @@ api.MapGet("/recordings/{id:long}/transcript/export", (long id, string? format) 
     var json = File.ReadAllText(rec.TranscriptPath);
     var result = JsonSerializer.Deserialize<AsrResult>(json, jsonOptions);
     if (result is null) return Results.Problem("transcript file corrupted");
+    ApplySpeakerNames(result, db, cfg); // 导出内容同样显示注册名
 
     var isSrt = string.Equals(format, "srt", StringComparison.OrdinalIgnoreCase);
     var text = isSrt ? BuildSrt(result) : BuildPlainText(result);
@@ -583,6 +589,9 @@ api.MapDelete("/recordings/{id:long}", (long id) =>
 {
     var rec = db.DeleteById(id);
     if (rec is null) return Results.NotFound(new { error = "not found" });
+
+    // 声纹注册样本级联清理（来源引用不悬空；仅剩该来源的空档案一并移除）
+    db.DeleteSpeakerSamplesByRecord(id);
 
     foreach (var p in new[] { rec.StoredPath, rec.TranscriptPath })
     {
@@ -603,6 +612,7 @@ api.MapPost("/recordings/batch-delete", (List<long> ids) =>
     {
         var rec = db.DeleteById(id);
         if (rec is null) { notFound.Add(id); continue; }
+        db.DeleteSpeakerSamplesByRecord(id); // 声纹注册样本级联清理
         foreach (var p in new[] { rec.StoredPath, rec.TranscriptPath })
         {
             if (string.IsNullOrWhiteSpace(p) || !File.Exists(p)) continue;
@@ -652,6 +662,95 @@ api.MapGet("/recordings/export/zip", async (HttpContext ctx, string? ids) =>
     await zip.DisposeAsync(); // 显式落 central directory / EOCD 后再结束响应
     return Results.Empty;
 });
+
+// ---- 声纹注册（说话人认名）----
+// 注册：在录音详情页把某说话人标注成名字 → 从该说话人的全部转写段
+// 提取声纹向量入库。之后渲染文字稿时用注册声纹比对每条记录的簇代表
+// 声纹，命中即把「说话人N」显示为注册名（历史记录即时生效，无需重转）。
+
+api.MapGet("/speakers", () => Results.Ok(new
+{
+    items = db.ListSpeakerProfiles().Select(p => new
+    {
+        id = p.Id,
+        name = p.Name,
+        createdAt = p.CreatedAt,
+        samples = p.Samples.Select(s => new
+        {
+            recordId = s.RecordId,
+            segLabel = s.SegLabel,
+            createdAt = s.CreatedAt
+        })
+    }),
+    matchThreshold = cfg.Speaker.MatchThreshold
+}));
+
+api.MapPost("/speakers", async (RegisterSpeakerRequest req) =>
+{
+    if (string.IsNullOrWhiteSpace(req.Name))
+        return Results.BadRequest(new { error = "name is required" });
+    var name = req.Name.Trim();
+    if (name.Length > 50)
+        return Results.BadRequest(new { error = "name too long (max 50 chars)" });
+
+    var rec = db.GetById(req.RecordId);
+    if (rec is null) return Results.NotFound(new { error = "recording not found" });
+    if (rec.TranscriptStatus != "done" || string.IsNullOrWhiteSpace(rec.TranscriptPath)
+        || !File.Exists(rec.TranscriptPath))
+        return Results.BadRequest(new { error = "transcript not ready" });
+
+    // 该说话人标签的全部转写段 → 时间段（边车把多段拼接提取，比单段更稳）
+    AsrResult? result;
+    try
+    {
+        result = JsonSerializer.Deserialize<AsrResult>(File.ReadAllText(rec.TranscriptPath), jsonOptions);
+    }
+    catch (Exception)
+    {
+        return Results.BadRequest(new { error = "transcript file corrupted" });
+    }
+    var ranges = (result?.Segments ?? [])
+        .Where(s => s.Speaker == req.SpeakerLabel && s.End > s.Start)
+        .Select(s => new[] { s.Start, s.End } as double[]).ToList();
+    if (ranges.Count == 0)
+        return Results.NotFound(new { error = "speaker not found in transcript" });
+
+    try
+    {
+        var (emb, secs) = await asr.SpeakerEmbeddingAsync(rec.StoredPath, ranges);
+        var profileId = db.AddSpeakerSample(name, req.RecordId, req.SpeakerLabel, emb);
+        var n = db.ListSpeakerProfiles().First(p => p.Id == profileId).Samples.Count;
+        logger.LogInformation(
+            "Speaker enrolled: {Name} <- record {Id} {Label} ({Sec:F1}s audio, {Samples} sample(s))",
+            name, req.RecordId, req.SpeakerLabel, secs, n);
+        return Results.Ok(new { id = profileId, name, seconds = Math.Round(secs, 1), samples = n });
+    }
+    catch (HttpRequestException ex)
+    {
+        // 边车 503（声纹模型未就绪）/ 400（有效音频过短）：错误信息透传前端
+        return Results.BadRequest(new { error = $"声纹提取失败：{ex.Message}" });
+    }
+    catch (OperationCanceledException) { throw; }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Speaker enrollment failed");
+        return Results.Problem("声纹提取失败：边车不可达或内部错误");
+    }
+});
+
+api.MapPatch("/speakers/{id:long}", (long id, RenameSpeakerRequest req) =>
+{
+    if (string.IsNullOrWhiteSpace(req.Name))
+        return Results.BadRequest(new { error = "name is required" });
+    if (!db.RenameSpeakerProfile(id, req.Name.Trim()))
+        return Results.NotFound(new { error = "not found" });
+    return Results.Ok(new { id, name = req.Name.Trim() });
+});
+
+api.MapDelete("/speakers/{id:long}", (long id) =>
+    db.DeleteSpeakerProfile(id)
+        ? Results.Ok(new { deleted = id })
+        : Results.NotFound(new { error = "not found" }));
 
 // 设置（ASR / 转写时机 / 保留策略，持久化到 settings.json）
 // diarizeReady：边车声纹模型是否就绪（探测缓存 5 分钟）——决定「说话人分段」勾选是否生效
@@ -832,6 +931,38 @@ static string SanitizeFileName(string name)
     foreach (var c in Path.GetInvalidFileNameChars())
         name = name.Replace(c, '_');
     return string.IsNullOrWhiteSpace(name) ? "transcript" : name.Trim();
+}
+
+/// <summary>
+/// 认名注入：按当前注册声纹库比对结果里每个说话人簇的代表向量，
+/// 命中（相似度达阈值且与次佳拉开差距）则把该簇所有段的「说话人N」
+/// 替换为注册名。就地修改；处理完剥离原始向量（响应/导出均不需要）。
+/// </summary>
+static void ApplySpeakerNames(AsrResult result, DbService db, VaultConfig cfg)
+{
+    if (result.Speakers is not { Count: > 0 })
+        return;
+    var index = db.GetSpeakerIndex();
+    if (index.Count > 0)
+    {
+        // 单条记录内一对一全局分配：同录音簇间相似度天然偏高，逐簇独立
+        // 匹配会让某档案删除后被"邻居簇"错误认领，故每档案至多认领一簇
+        VoiceMatcher.AssignNames(
+            result.Speakers, index, cfg.Speaker.MatchThreshold, cfg.Speaker.MatchMargin);
+        var nameByLabel = result.Speakers
+            .Where(s => !string.IsNullOrEmpty(s.Name) && !string.IsNullOrEmpty(s.Label))
+            .GroupBy(s => s.Label).ToDictionary(g => g.Key, g => g.First().Name!);
+        if (nameByLabel.Count > 0)
+        {
+            foreach (var seg in result.Segments ?? [])
+            {
+                if (!string.IsNullOrEmpty(seg.Speaker) && nameByLabel.TryGetValue(seg.Speaker, out var n))
+                    seg.Speaker = n;
+            }
+        }
+    }
+    foreach (var spk in result.Speakers)
+        spk.Embedding = null; // 原始向量不出服务端（无注册库时同样剥离）
 }
 
 app.Run();

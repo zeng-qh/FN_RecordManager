@@ -9,14 +9,18 @@ VoiceVault 本地语音转写边车（ASR）
       → { "status": "ok", "diarize": true|false }  diarize=声纹模型是否就绪
   POST /transcribe            同步转写（兼容旧客户端，长连接等完整结果）
       multipart: file=音频, model=模型规模, diarize=bool
-      → { "text": "...", "segments": [{start,end,text,speaker?}], "language": "zh" }
+      → { "text": "...", "segments": [{start,end,text,speaker?}],
+          "speakers": [{label, embedding?}], "language": "zh" }
   POST /transcribe-async      异步转写：立即返回，后台推理
       multipart: file=音频, model=模型规模, diarize=bool, task_id=str
       → { "task_id": "..." }
   GET  /transcribe-status/{task_id}   查询进度（轮询用）
       → { "status": "running|done|error", "progress": 0-100,
           "partial": "已转出的部分文本", "language": "zh",
-          "segments": [...], "text": "...", "error": "..." }
+          "segments": [...], "speakers": [...], "text": "...", "error": "..." }
+  POST /speaker-embedding     从音频指定时间段提取声纹（声纹注册用）
+      multipart: file=音频, ranges='[[start,end],...]'（秒）
+      → { "embedding": [192 floats], "seconds": 实际参与提取的有声时长 }
 
 说话人分段（diarize=true 时）：
   对每个转写段用 3D-Speaker CAM++ 声纹模型提取 192 维 embedding，
@@ -132,6 +136,19 @@ _DIARIZE_F0_DPRIME = float(os.environ.get("ASR_DIARIZE_F0_DPRIME", "1.5"))
 _DIARIZE_F0_DELTA = float(os.environ.get("ASR_DIARIZE_F0_DELTA", "0.22"))
 # 每簇最少占总有效段比例：挡离群音高（咳嗽/尖叫）成簇，但不误伤说话少的人
 _DIARIZE_F0_MIN_RATIO = float(os.environ.get("ASR_DIARIZE_F0_MIN_RATIO", "0.08"))
+# 高置信放宽：双峰可分辨度极高（d' ≥ _DIARIZE_F0_DPRIME_STRONG）时，
+# 音高差门槛放宽到 _DIARIZE_F0_DELTA_LOOSE（≈1.17x）。whisper 每次分段
+# 略有差异，音高接近的两人（如同性成年人）在部分分段下均值差会落在
+# 0.16–0.22 之间——d' 已确认是双峰而非单人语调漂移时，不应因门槛卡边
+# 而丢失一个人。实测校准（演示库）：三人录音第二层 gap 0.167–0.175
+# （d' 2.59–2.66）需要放宽才能切出；单人说话的提问上扬语调伪簇
+# gap 0.151（d' 2.74）须挡住——故取 0.16。
+_DIARIZE_F0_DPRIME_STRONG = float(os.environ.get("ASR_DIARIZE_F0_DPRIME_STRONG", "2.5"))
+_DIARIZE_F0_DELTA_LOOSE = float(os.environ.get("ASR_DIARIZE_F0_DELTA_LOOSE", "0.16"))
+# 占比强放宽（同理）：d' 极高（≥2.5）的小簇可能是真实第三人（如偶尔
+# 发言的高音儿童），占比门槛从 0.08 放宽到 0.06；全库模拟仅命中
+# 三人录音的小簇（7.7%），其余记录（含单人/两人/歌曲）行为不变。
+_DIARIZE_F0_MIN_RATIO_LOOSE = float(os.environ.get("ASR_DIARIZE_F0_MIN_RATIO_LOOSE", "0.06"))
 # 单段时长下限：过短（感叹词/抢话）的段声纹不可靠，跳过后继承前段标签
 _DIARIZE_MIN_SEG_SEC = 0.8
 # 解码音频上限（秒）：声纹分段需整条解码进内存，超长录音不标注（转写不受影响）
@@ -316,9 +333,15 @@ def _try_split_by_f0(audio: "np.ndarray", segments: list, min_seg_sec: float):
         hv = vals[vals > thr]
         gap = abs(hv.mean() - lv.mean())
         dprime = gap / np.sqrt(lv.var() + hv.var() + 1e-9)
-        if (gap < _DIARIZE_F0_DELTA or dprime < _DIARIZE_F0_DPRIME
-                or len(lo) < _DIARIZE_F0_MIN_RATIO * len(f0s)
-                or len(hi) < _DIARIZE_F0_MIN_RATIO * len(f0s)):
+        # 音高差门槛：常规 0.22；d' 极显著（双峰无疑）时放宽到 0.15，
+        # 避免 whisper 分段波动让音高接近的两人卡在门槛上漏切
+        gap_ok = gap >= _DIARIZE_F0_DELTA or (
+            dprime >= _DIARIZE_F0_DPRIME_STRONG and gap >= _DIARIZE_F0_DELTA_LOOSE)
+        # 占比门槛：常规 0.08；d' 极显著的小簇可能是真实第三人，放宽到 0.06
+        ratio = min(len(lo), len(hi)) / max(1, len(f0s))
+        ratio_ok = ratio >= _DIARIZE_F0_MIN_RATIO or (
+            dprime >= _DIARIZE_F0_DPRIME_STRONG and ratio >= _DIARIZE_F0_MIN_RATIO_LOOSE)
+        if (not gap_ok or dprime < _DIARIZE_F0_DPRIME or not ratio_ok):
             groups.append(list(idxs))  # 分离不足/占比失衡：不再切
             return
         split(lv, lo, depth + 1)
@@ -342,15 +365,18 @@ def _try_split_by_f0(audio: "np.ndarray", segments: list, min_seg_sec: float):
     return out
 
 
-def _assign_speakers(path: str, segments: list, extractor) -> None:
-    """对转写段做声纹聚类并就地写入 speaker 字段；失败静默（不影响转写结果）。"""
+def _assign_speakers(path: str, segments: list, extractor) -> list:
+    """对转写段做声纹聚类并就地写入 speaker 字段；失败静默（不影响转写结果）。
+    返回说话人元数据列表 [{"label": "说话人1", "embedding": [...]}]：
+    embedding 为该簇全部有效段声纹的均值（L2 归一化），供主服务做
+    「声纹注册 → 自动认人」比对；提取失败时不输出 embedding。"""
     import numpy as np
 
     audio = _decode_16k_mono_int16(path)
     total_sec = audio.size / 16000.0
     if total_sec > _DIARIZE_MAX_AUDIO_SEC:
         print(f"[asr] audio too long for diarization ({total_sec:.0f}s), skip", flush=True)
-        return
+        return []
 
     # 逐段提取声纹：段过短跳过（事后继承前段标签）
     keyed = []  # (段序, embedding)
@@ -365,7 +391,7 @@ def _assign_speakers(path: str, segments: list, extractor) -> None:
         keyed.append((i, extractor.compute(stream)))
 
     if not keyed:
-        return  # 全部段过短：不标注
+        return []  # 全部段过短：不标注
     labels = _cluster_embeddings(
         [e for _, e in keyed], _DIARIZE_THRESHOLD, _DIARIZE_MAX_SPEAKERS)
 
@@ -388,10 +414,89 @@ def _assign_speakers(path: str, segments: list, extractor) -> None:
             last = label_by_seg[i]
         seg["speaker"] = f"说话人{last + 1}"
 
+    # 簇代表声纹：该簇全部有效段 embedding 的均值（L2 归一化）。
+    # 单人声纹比单段更稳（覆盖多句话音素/语速变化）；无有效段的簇不输出向量。
+    speakers_meta = []
+    n_spk = max(label_by_seg.values()) + 1 if label_by_seg else 0
+    emb_by_seg = dict(keyed)
+    for k in range(n_spk):
+        embs = [emb_by_seg[i] for i in label_by_seg if i in emb_by_seg
+                and label_by_seg[i] == k]
+        if not embs:
+            continue
+        c = np.asarray(embs, dtype=np.float32).mean(0)
+        norm = float(np.linalg.norm(c))
+        if norm <= 0:
+            continue
+        speakers_meta.append({
+            "label": f"说话人{k + 1}",
+            "embedding": [round(float(x) / norm, 6) for x in c],
+        })
+    return speakers_meta
+
 
 @app.get("/health")
 def health():
     return {"status": "ok", "diarize": _diarize_ready()}
+
+
+@app.post("/speaker-embedding")
+async def speaker_embedding(
+    file: UploadFile = File(...),
+    ranges: str = Form("[]"),
+):
+    """从音频指定时间段提取声纹向量（192 维）——声纹注册用。
+    多段自动拼接（同一说话人的多句话合并成一条注册样本，比单段更稳）；
+    有效音频不足 1 秒时拒绝（过短声纹不可靠）。"""
+    import json
+
+    import numpy as np
+
+    extractor = _get_speaker_extractor()
+    if extractor is None:
+        return JSONResponse(status_code=503, content={"error": "voiceprint model not ready"})
+    try:
+        rr = json.loads(ranges or "[]")
+        pairs = [(float(a), float(b)) for a, b in rr if float(b) > float(a)]
+    except Exception:
+        return JSONResponse(
+            status_code=400, content={"error": "ranges must be JSON like [[start,end],...]"})
+    if not pairs:
+        return JSONResponse(status_code=400, content={"error": "ranges is empty"})
+
+    suffix = os.path.splitext(file.filename or "audio.m4a")[1] or ".m4a"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(file.file.read())
+        tmp_path = tmp.name
+    try:
+        audio = _decode_16k_mono_int16(tmp_path)
+    except Exception:
+        traceback.print_exc()
+        return JSONResponse(status_code=400, content={"error": "audio decode failed"})
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+    pieces, total_sec = [], 0.0
+    for a, b in pairs:
+        i0 = max(0, int(a * 16000))
+        i1 = min(len(audio), int(b * 16000))
+        if i1 - i0 > 0:
+            pieces.append(audio[i0:i1])
+            total_sec += (i1 - i0) / 16000.0
+    if total_sec < 1.0:
+        return JSONResponse(status_code=400, content={
+            "error": f"usable audio too short ({total_sec:.1f}s < 1.0s), "
+                     "refusing to enroll unreliable voiceprint"})
+    stream = extractor.create_stream()
+    stream.accept_waveform(16000, np.concatenate(pieces).astype(np.float32) / 32768.0)
+    stream.input_finished()
+    emb = extractor.compute(stream)
+    if not emb:
+        return JSONResponse(status_code=500, content={"error": "embedding extraction failed"})
+    return {"embedding": [float(x) for x in emb], "seconds": round(total_sec, 2)}
 
 
 def _run_job(task_id: str, tmp_path: str, model_size: str, diarize: bool):
@@ -452,6 +557,7 @@ def _run_job(task_id: str, tmp_path: str, model_size: str, diarize: bool):
 
         # 说话人分段：对已转出的段做声纹聚类（换的是声纹相似度，
         # 不再按停顿猜人）。模型缺失/解码失败时无 speaker 字段，转写照常返回。
+        speakers_meta: list = []
         if diarize and out_segments:
             try:
                 extractor = _get_speaker_extractor()
@@ -459,10 +565,11 @@ def _run_job(task_id: str, tmp_path: str, model_size: str, diarize: bool):
                     print("[asr] diarization requested but model missing — "
                           "segments without speaker labels", flush=True)
                 else:
-                    _assign_speakers(tmp_path, out_segments, extractor)
+                    speakers_meta = _assign_speakers(tmp_path, out_segments, extractor)
                     n_spk = len({s["speaker"] for s in out_segments if "speaker" in s})
+                    n_emb = sum(1 for s in speakers_meta if s.get("embedding"))
                     print(f"[asr] diarization done: {n_spk} speaker(s) "
-                          f"over {len(out_segments)} segments", flush=True)
+                          f"over {len(out_segments)} segments, {n_emb} voiceprints", flush=True)
             except Exception:
                 traceback.print_exc()  # 声纹失败不影响转写文本交付
 
@@ -473,6 +580,7 @@ def _run_job(task_id: str, tmp_path: str, model_size: str, diarize: bool):
             partial=" ".join(partial_parts),
             language=str(info.language or ""),
             segments=out_segments,
+            speakers=speakers_meta,
             text=text,
             duration=container_duration,
             speech=duration,
@@ -521,6 +629,7 @@ def transcribe(
             return {
                 "text": job.get("text") or "",
                 "segments": job.get("segments") or [],
+                "speakers": job.get("speakers") or [],
                 "language": job.get("language"),
                 "duration": job.get("duration", 0.0),
             "speech": job.get("speech", 0.0),
@@ -561,6 +670,7 @@ def transcribe_status(task_id: str):
             "partial": job.get("partial") or "",
             "language": job.get("language"),
             "segments": job.get("segments"),
+            "speakers": job.get("speakers"),
             "text": job.get("text"),
             "duration": job.get("duration", 0.0),
             "speech": job.get("speech", 0.0),
