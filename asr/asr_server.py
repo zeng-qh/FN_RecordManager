@@ -24,13 +24,17 @@ VoiceVault 本地语音转写边车（ASR）
   「说话人N」。模型缺失时优雅降级：不输出 speaker 字段（不再给出
   按停顿猜测的虚假编号）。若声纹聚出的簇数收敛为 1（电话/免提通话
   双方共用信道压缩，频谱声纹可能不可分），自动回退用段级基频 F0
-  （音高）二分——男女对话 F0 差通常 >30%，仅在分离度显著时才采用。
+  （音高）递归二分——男女/成人儿童音高差通常 >30%，按分离度与占比
+  自动确定人数 1–4，仅在显著分离时才采用。
   模型文件默认找 ./models/campplus.onnx，可用环境变量覆盖：
     ASR_DIARIZE_MODEL        声纹模型 onnx 路径
     ASR_DIARIZE_THRESHOLD    聚类合并阈值（同人余弦越高，默认 0.65）
     ASR_DIARIZE_MAX_SPEAKERS 说话人数封顶，超出强制合并最相似簇（默认 8）
-    ASR_DIARIZE_F0_DELTA     F0 回退的最小 log 音高差（默认 0.15 ≈ 两簇
-                             中位音高比 1.16x，低于此视为同一人不硬分）
+    ASR_DIARIZE_F0_DPRIME    F0 分簇的双峰可分辨度阈值（默认 1.5，
+                             d'=|Δμ|/sqrt(σ1²+σ2²)，同一人语调波动通常 <1.5）
+    ASR_DIARIZE_F0_DELTA     F0 分簇的最小 log 音高差（默认 0.22 ≈ 两簇
+                             中位音高比 1.25x）
+    ASR_DIARIZE_F0_MIN_RATIO F0 分簇的最小占比（默认 0.08，挡离群音高）
 
 运行：
   pip install -r requirements.txt
@@ -115,9 +119,19 @@ _DIARIZE_MODEL_CANDIDATES = [
 ]
 _DIARIZE_THRESHOLD = float(os.environ.get("ASR_DIARIZE_THRESHOLD", "0.42"))
 _DIARIZE_MAX_SPEAKERS = int(os.environ.get("ASR_DIARIZE_MAX_SPEAKERS", "8"))
-# F0 回退分裂的最小分离度（log 域两簇均值差）：0.15 ≈ 两簇中位音高比 1.16x。
-# 男女对话典型差 0.3+（比值 1.35x+）；单人语调波动切开通常 <0.12。
-_DIARIZE_F0_DELTA = float(os.environ.get("ASR_DIARIZE_F0_DELTA", "0.15"))
+# F0 回退分裂：递归二分自动定人数（1–4）。每次切分需同时满足：
+# 1) 双分布可分辨：d' = |Δμ|/sqrt(σ1²+σ2²) ≥ _DIARIZE_F0_DPRIME
+#    （两人音区=双峰可分辨；同一人语调波动为宽单峰，d' 通常 <1.5）
+# 2) 音高差足够：gap = |Δμ|（log 域）≥ _DIARIZE_F0_DELTA，
+#    0.22 ≈ 两簇中位音高比 1.25x（约 3.8 半音），挡窄音域内小漂移
+# 3) 占比均衡：各簇 ≥ _DIARIZE_F0_MIN_RATIO（挡离群音高成簇）
+# 实测校准：两人通话 d' 1.57–2.89 全部切出；三人 3 簇；单人/歌曲（有效
+# 段 <12）不触发。微信通话录音双方共用信道，声纹常整体失效聚成 1 簇，
+# 此时 F0 是主要可分特征——男女 0.3+/成人儿童 0.4+，同性别两人 0.2+。
+_DIARIZE_F0_DPRIME = float(os.environ.get("ASR_DIARIZE_F0_DPRIME", "1.5"))
+_DIARIZE_F0_DELTA = float(os.environ.get("ASR_DIARIZE_F0_DELTA", "0.22"))
+# 每簇最少占总有效段比例：挡离群音高（咳嗽/尖叫）成簇，但不误伤说话少的人
+_DIARIZE_F0_MIN_RATIO = float(os.environ.get("ASR_DIARIZE_F0_MIN_RATIO", "0.08"))
 # 单段时长下限：过短（感叹词/抢话）的段声纹不可靠，跳过后继承前段标签
 _DIARIZE_MIN_SEG_SEC = 0.8
 # 解码音频上限（秒）：声纹分段需整条解码进内存，超长录音不标注（转写不受影响）
@@ -229,15 +243,15 @@ def _cluster_embeddings(embs, threshold: float, max_speakers: int):
 
 
 def _f0_median(x: "np.ndarray", sr: int = 16000) -> float:
-    """自相关法提取段级基频中位数（60–400Hz）；无足够有声帧返回 0。
-    纯 numpy 实现（每 ~80ms 一帧，周期性强度 >0.5 才计入），用于声纹
-    失效时的回退分簇：电话录音双方共用信道，频谱声纹可能不可分，但
-    音高（男女声差异）不经过信道压缩消失。"""
+    """自相关法提取段级基频中位数（60–450Hz，上限覆盖儿童尖声）；无足够
+    有声帧返回 0。纯 numpy 实现（每 ~80ms 一帧，周期性强度 >0.5 才计入），
+    用于声纹失效时的回退分簇：电话录音双方共用信道，频谱声纹可能不可分，
+    但音高（男女/成人儿童差异）不经过信道压缩消失。"""
     import numpy as np
 
     frame = int(sr * 0.04)   # 40ms 分析帧
     hop = int(sr * 0.02) * 4
-    lag_min, lag_max = sr // 400, sr // 60
+    lag_min, lag_max = sr // 450, sr // 60
     f0s = []
     for i in range(0, len(x) - frame, hop):
         f = x[i:i + frame].astype(np.float32)
@@ -256,10 +270,14 @@ def _f0_median(x: "np.ndarray", sr: int = 16000) -> float:
 
 
 def _try_split_by_f0(audio: "np.ndarray", segments: list, min_seg_sec: float):
-    """声纹聚成 1 簇时的基频回退：按段级 log-F0 做最优二分（最小化簇内
-    方差和）。仅当分离度显著（两簇均值差 > _DIARIZE_F0_DELTA 且两簇
-    各占总有效段 15% 以上）才采用，否则返回 None（维持 1 人，不硬分）。
-    返回 段序 -> 0/1（短段/无有效 F0 的段继承时间最近的有效段标签）。"""
+    """声纹聚成 1 簇时的基频回退：对段级 log-F0 递归做最优二分（最小化
+    簇内方差和），自动确定人数 1–4。每次切分需同时满足：
+    1) 双分布可分辨：d' = |Δμ|/sqrt(σ1²+σ2²) ≥ _DIARIZE_F0_DPRIME
+    2) 音高差足够：|Δμ|（log 域）≥ _DIARIZE_F0_DELTA
+    3) 占比均衡：两簇各占总有效段 _DIARIZE_F0_MIN_RATIO 以上
+    任一不满足即停（维持当前簇，宁少分不错分）。返回 段序 -> 簇序
+    （簇按 F0 从低到高排序），无有效切分返回 None。短段/无有效 F0 的
+    段继承时间最近的有效段标签。"""
     import numpy as np
 
     f0s = []  # (段序, log-F0)
@@ -271,33 +289,55 @@ def _try_split_by_f0(audio: "np.ndarray", segments: list, min_seg_sec: float):
         f0 = _f0_median(audio[a:b])
         if f0 > 0:
             f0s.append((i, float(np.log(f0))))
-    if len(f0s) < 6:
+    if len(f0s) < 12:
         return None
 
-    vals = np.array([v for _, v in f0s])
-    sv = np.sort(vals)
-    n = len(sv)
-    csum, csum2 = np.cumsum(sv), np.cumsum(sv ** 2)
-    best_cut, best_cost, best_gap = -1, None, 0.0
-    for cut in range(1, n):  # 左簇 = sv[:cut]
-        m1, s1 = csum[cut - 1] / cut, csum2[cut - 1]
-        m2, s2 = (csum[-1] - csum[cut - 1]) / (n - cut), csum2[-1] - csum2[cut - 1]
-        cost = (s1 - csum[cut - 1] ** 2 / cut) + (s2 - (csum[-1] - csum[cut - 1]) ** 2 / (n - cut))
-        if best_cost is None or cost < best_cost:
-            best_cost, best_cut = cost, cut
-            best_gap = m2 - m1
-    if best_gap < _DIARIZE_F0_DELTA:
-        return None
-    lo_n = int(np.searchsorted(sv, (sv[best_cut - 1] + sv[best_cut]) / 2, side="right"))
-    if lo_n < 0.15 * n or lo_n > 0.85 * n:
-        return None
+    groups = []  # 每簇：段序列表
 
-    thr = (sv[best_cut - 1] + sv[best_cut]) / 2
-    label_by_seg = {i: (0 if v <= thr else 1) for i, v in f0s}
+    def split(vals, idxs, depth):
+        if len(vals) < 12 or depth >= 3:
+            groups.append(list(idxs))
+            return
+        order = np.argsort(vals)
+        sv = vals[order]
+        n = len(sv)
+        csum, csum2 = np.cumsum(sv), np.cumsum(sv ** 2)
+        tot = csum[-1]
+        best_cut, best_cost = -1, None
+        for cut in range(1, n):  # 左簇 = sv[:cut]
+            cost = (csum2[cut - 1] - csum[cut - 1] ** 2 / cut) + \
+                   ((csum2[-1] - csum2[cut - 1]) - (tot - csum[cut - 1]) ** 2 / (n - cut))
+            if best_cost is None or cost < best_cost:
+                best_cost, best_cut = cost, cut
+        thr = (sv[best_cut - 1] + sv[best_cut]) / 2
+        lo = [idxs[i] for i in range(len(idxs)) if vals[i] <= thr]
+        hi = [idxs[i] for i in range(len(idxs)) if vals[i] > thr]
+        lv = vals[vals <= thr]
+        hv = vals[vals > thr]
+        gap = abs(hv.mean() - lv.mean())
+        dprime = gap / np.sqrt(lv.var() + hv.var() + 1e-9)
+        if (gap < _DIARIZE_F0_DELTA or dprime < _DIARIZE_F0_DPRIME
+                or len(lo) < _DIARIZE_F0_MIN_RATIO * len(f0s)
+                or len(hi) < _DIARIZE_F0_MIN_RATIO * len(f0s)):
+            groups.append(list(idxs))  # 分离不足/占比失衡：不再切
+            return
+        split(lv, lo, depth + 1)
+        split(hv, hi, depth + 1)
+
+    vidx = [i for i, _ in f0s]
+    vval = np.array([v for _, v in f0s])
+    split(vval, vidx, 0)
+    if len(groups) < 2:
+        return None
+    # 簇按 F0 中位数从低到高编号（与按首次发言编号相比更稳定，不依赖谁先开口）
+    fmap = dict(f0s)
+    groups.sort(key=lambda g: float(np.median([fmap[i] for i in g])))
+    label_of = {i: k for k, g in enumerate(groups) for i in g}
+
     out, last = {}, 0
     for i in range(len(segments)):
-        if i in label_by_seg:
-            last = label_by_seg[i]
+        if i in label_of:
+            last = label_of[i]
         out[i] = last
     return out
 
@@ -336,8 +376,9 @@ def _assign_speakers(path: str, segments: list, extractor) -> None:
         # 分裂——男女对话 F0 差通常 >30%，仅分离度显著时才采用。
         split = _try_split_by_f0(audio, segments, _DIARIZE_MIN_SEG_SEC)
         if split is not None:
-            print("[asr] voiceprint collapsed to 1 cluster, "
-                  "split into 2 speakers by F0", flush=True)
+            n_spk = len(set(split.values()))
+            print(f"[asr] voiceprint collapsed to 1 cluster, "
+                  f"split into {n_spk} speakers by F0", flush=True)
             label_by_seg = split
 
     # 有声纹的段按簇编号；过短段继承时间最近的前段（与真人对话抢话场景吻合）
