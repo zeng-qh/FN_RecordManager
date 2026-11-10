@@ -168,7 +168,8 @@
             <div id="idlePreview" class="idle-preview"></div>
           </div>
           <label>ASR 边车地址
-            <input id="cfgAsrEndpoint" type="text" placeholder="http://localhost:8000" />
+            <input id="cfgAsrEndpoint" type="text" placeholder="http://asr:8000" />
+            <span class="idle-hint">转写引擎地址。compose 同栈部署填 http://asr:8000；边车裸跑在宿主机填 http://设备IP:8000。留空走默认。填错不影响备份，仅不能自动转写。</span>
           </label>
           <label>模型规模
             <select id="cfgAsrModel">
