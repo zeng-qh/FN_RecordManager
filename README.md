@@ -42,7 +42,9 @@
 ### 方式 A：Docker Compose（推荐）
 
 ```bash
-echo "VAULT_TOKEN=你的强令牌" > .env
+# 1. 编辑 docker-compose.yml：把 environment 里的
+#    VAULT_TOKEN=change-me-please 改成你的强令牌
+# 2. 启动
 docker compose up -d
 # 浏览器打开 http://<nas-ip>:8080 ，在设置里填入上面的令牌
 ```

@@ -1,16 +1,18 @@
 # VoiceVault 服务端部署（NAS / 树莓派 4B / x86 通用）
 # 用法：
-#   echo "VAULT_TOKEN=你的强令牌" > .env
-#   docker compose up -d
+#   1. 编辑下方 environment 里的 VAULT_TOKEN（改成你的强令牌）
+#   2. docker compose up -d
+#   3. 浏览器打开 http://<设备ip>:8080 ，设置里填同一个令牌
 #
 # ┌ 内存档位速查 ─────────────────────────────────────────────
-# │ 2GB 设备：保持默认（tiny 模型），无需 .env 配置
-# │ 4GB 设备：.env 里加
-# │   VAULT_ASR_MODEL=small    # 中文准确率明显更好
-# │   VAULT_MEMLIMIT=1536m     # 服务端上限（防失控护栏）
-# │   ASR_MEMLIMIT=2048m       # 边车上限——small 推理峰值可到 ~1GB+，
-# │                            # 不放宽会撞 1024m 默认值被反复 OOM kill
-# │   ASR_CPUS=2.5             # 边车推理核数（留 1.5 核给系统/其他应用）
+# │ 2GB 设备：保持默认（tiny 模型），无需任何配置
+# │ 4GB 设备：直接改下方对应行——
+# │   voicvault:  VAULT_ASR__MODEL 改 small（中文准确率更好）
+# │               mem_limit 改 1536m
+# │   asr:        mem_limit 改 2048m（small 推理峰值 ~1GB+，
+# │               不放宽会被 1024m 护栏反复 OOM kill）
+# │               cpus 改 "2.5"（留核给系统/其他应用）
+# │   （也可不改文件，用 .env 设 ASR_MEMLIMIT/ASR_CPUS/VAULT_ASR_MODEL 覆盖）
 # └───────────────────────────────────────────────────────────
 services:
   voicvault:
@@ -25,18 +27,19 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - VAULT_TOKEN=${VAULT_TOKEN:-change-me-please}
+      # 访问令牌：直接改这一行（换成你的强随机串），网页端「设置 → 访问令牌」填同一个值
+      - VAULT_TOKEN=change-me-please
       - VAULT_DATADIR=/data
       - VAULT_PORT=8080
       - VAULT_BIND=0.0.0.0
-      # 转写模型：2GB 用 tiny；4GB 推荐改 small（中文准确率明显更好）
-      - VAULT_ASR__MODEL=${VAULT_ASR_MODEL:-tiny}
-      # 默认开启实时转写（上传即转）。如需关闭：.env 里设 VAULT_ASR_ENABLED=false
-      # 转写时机：Off（关闭，仅手动）/ Realtime（上传即转）/ Idle（闲时转写）。
-      - VAULT_ASR__ENABLED=${VAULT_ASR_ENABLED:-true}
-      - VAULT_ASR__MODE=${VAULT_ASR_MODE:-Realtime}
-      - VAULT_ASR__IDLESTARTHOUR=${VAULT_ASR_IDLESTARTHOUR:-22}
-      - VAULT_ASR__IDLEENDHOUR=${VAULT_ASR_IDLEENDHOUR:-7}
+      # 转写模型：2GB 设备用 tiny；4GB 推荐改 small（中文准确率明显更好）
+      - VAULT_ASR__MODEL=tiny
+      # 默认开启实时转写（上传即转）。改 false 则只备份不自动转写
+      # 转写时机：Off（关闭，仅手动）/ Realtime（上传即转）/ Idle（闲时转写）
+      - VAULT_ASR__ENABLED=true
+      - VAULT_ASR__MODE=Realtime
+      - VAULT_ASR__IDLESTARTHOUR=22
+      - VAULT_ASR__IDLEENDHOUR=7
     # 内存硬上限（防失控护栏，非实际占用）：默认 2GB 小设备保守值。
     # 4GB 设备在 .env 设 VAULT_MEMLIMIT=1536m。
     mem_limit: ${VAULT_MEMLIMIT:-896m}

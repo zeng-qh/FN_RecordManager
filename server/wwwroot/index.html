@@ -119,73 +119,77 @@
 
   <!-- 设置弹窗 -->
   <div id="settingsModal" class="modal" hidden>
-    <div class="modal-card">
+    <div class="modal-card settings-card">
       <h2>设置</h2>
       <div id="srvStatus" class="srv-status">服务器状态加载中…</div>
-      <label>服务器地址
-        <input id="cfgServer" type="text" placeholder="http://192.168.1.10:8080" />
-      </label>
-      <label>访问令牌 (Token)
-        <input id="cfgToken" type="password" placeholder="与服务端 VAULT_TOKEN 一致" />
-      </label>
-      <hr />
-      <h3>本地转写 (ASR)</h3>
-      <label class="row">
-        <input id="cfgAsrEnabled" type="checkbox" /> 启用语音转文字
-      </label>
-      <label>转写时机
-        <select id="cfgAsrMode">
-          <option value="off">关闭（仅手动转写）</option>
-          <option value="realtime" selected>实时转写（上传后立即）</option>
-          <option value="idle">闲时转写（设定空闲时段）</option>
-        </select>
-      </label>
-      <div id="idleWindowBox" class="idle-window" hidden>
-        <div class="idle-hint">每天仅在以下空闲时段内转写，其余时间只备份不转写（按服务器本地时区）。</div>
-        <div class="idle-range">
-          <label>起始 <input id="cfgAsrIdleStart" type="number" min="0" max="23" step="1" value="22" /> 时</label>
-          <span class="idle-sep">→</span>
-          <label>结束 <input id="cfgAsrIdleEnd" type="number" min="0" max="23" step="1" value="7" /> 时</label>
+      <div class="settings-grid">
+        <div class="settings-col">
+          <h3>连接</h3>
+          <label>服务器地址
+            <input id="cfgServer" type="text" placeholder="http://192.168.1.10:8080" />
+          </label>
+          <label>访问令牌 (Token)
+            <input id="cfgToken" type="password" placeholder="与服务端 VAULT_TOKEN 一致" />
+          </label>
+          <h3>保留策略</h3>
+          <div class="idle-hint">超期或超出容量上限时，自动从最旧的录音开始清理（两项都填 0 表示永久保留全部）。</div>
+          <div class="idle-range">
+            <label>保留 <input id="cfgRetDays" type="number" min="0" max="36500" step="1" value="0" /> 天</label>
+            <span class="idle-sep">·</span>
+            <label>上限 <input id="cfgRetGb" type="number" min="0" step="1" value="0" /> GB</label>
+          </div>
+          <label>每页条数
+            <select id="cfgPageSize">
+              <option value="20">20 条 / 页</option>
+              <option value="50">50 条 / 页</option>
+              <option value="100">100 条 / 页</option>
+            </select>
+          </label>
         </div>
-        <div id="idlePreview" class="idle-preview"></div>
+        <div class="settings-col">
+          <h3>本地转写 (ASR)</h3>
+          <label class="row">
+            <input id="cfgAsrEnabled" type="checkbox" /> 启用语音转文字
+          </label>
+          <label>转写时机
+            <select id="cfgAsrMode">
+              <option value="off">关闭（仅手动转写）</option>
+              <option value="realtime" selected>实时转写（上传后立即）</option>
+              <option value="idle">闲时转写（设定空闲时段）</option>
+            </select>
+          </label>
+          <div id="idleWindowBox" class="idle-window" hidden>
+            <div class="idle-hint">每天仅在以下空闲时段内转写，其余时间只备份不转写（按服务器本地时区）。</div>
+            <div class="idle-range">
+              <label>起始 <input id="cfgAsrIdleStart" type="number" min="0" max="23" step="1" value="22" /> 时</label>
+              <span class="idle-sep">→</span>
+              <label>结束 <input id="cfgAsrIdleEnd" type="number" min="0" max="23" step="1" value="7" /> 时</label>
+            </div>
+            <div id="idlePreview" class="idle-preview"></div>
+          </div>
+          <label>ASR 边车地址
+            <input id="cfgAsrEndpoint" type="text" placeholder="http://localhost:8000" />
+          </label>
+          <label>模型规模
+            <select id="cfgAsrModel">
+              <option value="tiny">tiny（最快）</option>
+              <option value="base">base</option>
+              <option value="small" selected>small（推荐）</option>
+              <option value="medium">medium（更准）</option>
+            </select>
+          </label>
+          <label class="row">
+            <input id="cfgAsrDiarize" type="checkbox" /> 说话人分段
+            <span id="cfgAsrDiarizeHint" class="diarize-hint"></span>
+          </label>
+          <h3>声纹库</h3>
+          <div class="idle-hint">
+            在录音详情页点说话人标签，把「说话人N」标注成真名（如：张三）。
+            注册后，所有记录里同一嗓音会自动显示为该名字；同一人多条录音可反复标注加固识别。
+          </div>
+          <div id="spkList" class="spk-list"></div>
+        </div>
       </div>
-      <label>ASR 边车地址
-        <input id="cfgAsrEndpoint" type="text" placeholder="http://localhost:8000" />
-      </label>
-      <label>模型规模
-        <select id="cfgAsrModel">
-          <option value="tiny">tiny（最快）</option>
-          <option value="base">base</option>
-          <option value="small" selected>small（推荐）</option>
-          <option value="medium">medium（更准）</option>
-        </select>
-      </label>
-      <label class="row">
-        <input id="cfgAsrDiarize" type="checkbox" /> 说话人分段
-        <span id="cfgAsrDiarizeHint" class="diarize-hint"></span>
-      </label>
-      <hr />
-      <h3>声纹库</h3>
-      <div class="idle-hint">
-        在录音详情页点说话人标签，把「说话人N」标注成真名（如：张三）。
-        注册后，所有记录里同一嗓音会自动显示为该名字；同一人多条录音可反复标注加固识别。
-      </div>
-      <div id="spkList" class="spk-list"></div>
-      <hr />
-      <h3>保留策略</h3>
-      <div class="idle-hint">超期或超出容量上限时，自动从最旧的录音开始清理（两项都填 0 表示永久保留全部）。</div>
-      <div class="idle-range">
-        <label>保留 <input id="cfgRetDays" type="number" min="0" max="36500" step="1" value="0" /> 天</label>
-        <span class="idle-sep">·</span>
-        <label>上限 <input id="cfgRetGb" type="number" min="0" step="1" value="0" /> GB</label>
-      </div>
-      <label>每页条数
-        <select id="cfgPageSize">
-          <option value="20">20 条 / 页</option>
-          <option value="50">50 条 / 页</option>
-          <option value="100">100 条 / 页</option>
-        </select>
-      </label>
       <div class="modal-actions">
         <button id="transcribeAllBtn">转写全部未处理</button>
         <button id="testConn">测试连接</button>
