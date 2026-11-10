@@ -32,6 +32,9 @@ services:
       - VAULT_DATADIR=/data
       - VAULT_PORT=8080
       - VAULT_BIND=0.0.0.0
+      # ASR 边车地址：同栈部署固定 http://asr:8000（compose 服务名解析）。
+      # 边车裸跑在宿主机时改成 http://<设备IP>:8000
+      - VAULT_ASR__ENDPOINT=http://asr:8000
       # 转写模型：2GB 设备用 tiny；4GB 推荐改 small（中文准确率明显更好）
       - VAULT_ASR__MODEL=tiny
       # 默认开启实时转写（上传即转）。改 false 则只备份不自动转写

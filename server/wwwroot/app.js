@@ -4,12 +4,15 @@ const LS_SERVER = "vv_server";
 const LS_TOKEN = "vv_token";
 
 // URL ?token= 自动保存：部署完成后打开 http://<ip>:8080/?token=<令牌> 即免填直接进入。
-// URL 值始终覆盖旧值（换令牌时新链接即时生效）；随后从地址栏移除参数，避免泄漏到历史记录。
+// URL 值始终覆盖旧值（换令牌时新链接即时生效）；随后只从地址栏移除 token 参数，
+// 保留其余参数（如发布平台的 sharecode——丢了会导致网关 403、刷新/分享失效）。
 (() => {
   const t = new URLSearchParams(location.search).get("token");
   if (t) {
     localStorage.setItem(LS_TOKEN, t);
-    history.replaceState(null, "", location.pathname);
+    const u = new URL(location.href);
+    u.searchParams.delete("token");
+    history.replaceState(null, "", u.pathname + u.search);
   }
 })();
 

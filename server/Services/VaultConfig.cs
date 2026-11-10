@@ -23,11 +23,13 @@ public enum TranscribeMode
 /// </summary>
 public class AsrConfig
 {
-    /// <summary>是否启用转写。默认关闭，备份不受影响。</summary>
-    public bool Enabled { get; set; }
+    /// <summary>是否启用转写。默认开启（配合默认实时转写：上传即转写）。
+    /// 没部署边车时转写会失败重试后标记错误，备份本身不受影响；
+    /// 不需要自动转写可在设置页或 compose 里关掉。</summary>
+    public bool Enabled { get; set; } = true;
 
-    /// <summary>转写触发模式：Off 关闭 / Realtime 实时 / Idle 闲时。</summary>
-    public TranscribeMode Mode { get; set; } = TranscribeMode.Off;
+    /// <summary>转写触发模式：Off 关闭 / Realtime 实时 / Idle 闲时。默认实时。</summary>
+    public TranscribeMode Mode { get; set; } = TranscribeMode.Realtime;
 
     /// <summary>闲时时段起始小时（0–23，服务器本地时区），含该整点。</summary>
     public int IdleStartHour { get; set; } = 22;
@@ -41,8 +43,8 @@ public class AsrConfig
     /// <summary>使用的 Whisper 模型规模，如 tiny/small/medium。</summary>
     public string Model { get; set; } = "small";
 
-    /// <summary>是否启用说话人分段（进阶，需边车支持）。</summary>
-    public bool SpeakerDiarization { get; set; }
+    /// <summary>是否启用说话人分段。默认开启（边车未带声纹模型时优雅降级为不标注）。</summary>
+    public bool SpeakerDiarization { get; set; } = true;
 
     /// <summary>判断给定本地时间是否处于本配置定义的闲时窗口内。</summary>
     public bool InIdleWindowNow(DateTime? localNow = null)
