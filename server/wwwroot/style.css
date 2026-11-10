@@ -573,3 +573,28 @@ main { flex: 1; padding: 20px; max-width: 900px; width: 100%; margin: 0 auto; }
 
 /* ---- 声纹注册弹窗 ---- */
 .spk-card { width: min(420px, 92vw); }
+
+/* ---- 声纹详情弹窗（声纹库点档案进入）---- */
+.spk-card { width: min(520px, 92vw); max-height: 86vh; overflow-y: auto; }
+.spk-card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.spk-card-head h2 { margin: 0; }
+.spk-card-head button {
+  width: 30px; height: 30px; cursor: pointer; font-size: 14px;
+  background: transparent; border: 1px solid var(--border); border-radius: 8px; color: var(--muted);
+}
+.spk-card-head button:hover { border-color: var(--accent); color: var(--accent); }
+.spk-card-actions { display: flex; gap: 8px; margin: 12px 0 2px; }
+.spk-card-actions button {
+  padding: 6px 14px; cursor: pointer; font-size: 13px;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; color: var(--text);
+}
+.spk-card-actions button:hover { border-color: var(--accent); color: var(--accent); }
+.spk-occ-list { display: flex; flex-direction: column; gap: 6px; }
+.spk-occ-row {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--panel-2); cursor: pointer;
+}
+.spk-occ-row:hover { border-color: var(--accent); }
+.spk-occ-row .spk-occ-name { font-size: 13.5px; font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.spk-occ-row small { font-size: 12px; color: var(--muted); flex: none; }

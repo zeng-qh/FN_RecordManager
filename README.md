@@ -46,7 +46,8 @@
 #    VAULT_TOKEN=change-me-please 改成你的强令牌
 # 2. 启动
 docker compose up -d
-# 浏览器打开 http://<nas-ip>:8080 ，在设置里填入上面的令牌
+# 浏览器打开 http://<nas-ip>:8080/?token=你的令牌 ，免填令牌直接进入
+# （URL 参数会自动保存并从地址栏移除；也可打开不带 token 的地址，在设置里手动填）
 ```
 
 ### 方式 B：docker run

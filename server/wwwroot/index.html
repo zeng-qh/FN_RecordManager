@@ -199,6 +199,25 @@
     </div>
   </div>
 
+  <!-- 声纹详情：注册样本 + 出现记录，可跳转录音继续标注 -->
+  <div id="spkDetailModal" class="modal" hidden>
+    <div class="modal-card spk-card">
+      <div class="spk-card-head">
+        <h2 id="spkDetailTitle">—</h2>
+        <button id="spkDetailClose" title="关闭">✕</button>
+      </div>
+      <div class="spk-card-actions">
+        <button id="spkRename">改名</button>
+        <button id="spkDelete">删除声纹</button>
+      </div>
+      <h3>注册样本</h3>
+      <div id="spkDetailSamples" class="spk-list"></div>
+      <h3>出现的录音</h3>
+      <div class="idle-hint">按注册声纹比对全部记录的说话人簇（阈值内即列出）；点击跳转详情可继续标注或试听。</div>
+      <div id="spkOccurrences" class="spk-occ-list"><div class="spk-empty">加载中…</div></div>
+    </div>
+  </div>
+
   <!-- 录音详情：左侧播放 / 右侧文字稿 -->
   <div id="detailModal" class="modal" hidden>
     <div class="detail">

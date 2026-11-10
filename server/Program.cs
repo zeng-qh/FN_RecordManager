@@ -685,6 +685,52 @@ api.MapGet("/speakers", () => Results.Ok(new
     matchThreshold = cfg.Speaker.MatchThreshold
 }));
 
+// 某注册声纹出现在哪些录音：遍历全部已完成转写的簇代表声纹与该档案
+// 样本比对，取最高余弦相似度，达阈值即计入。供声纹详情弹窗展示
+// 「出现记录」并跳转详情（继续标注/试听）。
+api.MapGet("/speakers/{id:long}/occurrences", (long id) =>
+{
+    var profile = db.ListSpeakerProfiles().FirstOrDefault(p => p.Id == id);
+    if (profile is null) return Results.NotFound(new { error = "not found" });
+    var samples = profile.Samples.Where(s => s.Embedding.Length > 0).ToList();
+    if (samples.Count == 0) return Results.Ok(new { items = Array.Empty<object>() });
+
+    var threshold = cfg.Speaker.MatchThreshold;
+    var found = new List<(long RecordedAt, object Item)>();
+    foreach (var rec in db.ListForTranscribe("done"))
+    {
+        if (string.IsNullOrWhiteSpace(rec.TranscriptPath) || !File.Exists(rec.TranscriptPath))
+            continue;
+        AsrResult? result;
+        try
+        {
+            result = JsonSerializer.Deserialize<AsrResult>(File.ReadAllText(rec.TranscriptPath), jsonOptions);
+        }
+        catch (Exception) { continue; } // 损坏的文字稿跳过，不中断整表
+
+        (string Label, double Score) best = ("", 0);
+        foreach (var spk in result?.Speakers ?? [])
+        {
+            if (spk.Embedding is not { Count: > 0 }) continue;
+            var score = samples.Max(s => VoiceMatcher.Cosine(spk.Embedding, s.Embedding));
+            if (score > best.Score) best = (spk.Label ?? "", score);
+        }
+        if (best.Score >= threshold)
+            found.Add((rec.RecordedAt, new
+            {
+                recordId = rec.Id,
+                title = rec.Title,
+                recordedAt = rec.RecordedAt,
+                label = best.Label,
+                score = Math.Round(best.Score, 3)
+            }));
+    }
+    return Results.Ok(new
+    {
+        items = found.OrderByDescending(f => f.RecordedAt).Select(f => f.Item).ToList()
+    });
+});
+
 api.MapPost("/speakers", async (RegisterSpeakerRequest req) =>
 {
     if (string.IsNullOrWhiteSpace(req.Name))
