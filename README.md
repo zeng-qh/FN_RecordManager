@@ -372,8 +372,13 @@ python3 client-cli/voicvault_sync.py \
   自动入库——走与上传完全一致的管道（SHA-256 **自动去重**、来源分类、按转写时机转写）。
   - 手机地址推荐填「无线调试」页显示的 **IP:端口**（端口随开关漂移，变了需更新）；
     只填 IP 时默认 5555 并尽力 mDNS 自动探测（bridge 容器常收不到组播，探测是尽力而为）；
-  - 录音目录多个用逗号分隔，如微信语音
-    `/sdcard/Android/data/com.tencent.mm/MicroMsg/<账号hash>/voice2`（按手机实际路径）；
+  - 录音目录多个用逗号分隔，递归扫描子目录，不存在的目录自动跳过（多填无害）。
+    常见机型实测路径（微信通话录音走系统录音机「应用通话录音」功能，不在微信目录）：
+    `/sdcard/Recordings`（华为/荣耀/OPPO/vivo/三星）、
+    `/sdcard/MIUI/sound_recorder`（小米：`call_rec/` 电话录音、`app_rec/` 应用通话录音=微信通话）、
+    `/sdcard/Sound recorder`（老机型）、`/sdcard/Music/Recordings`；
+  - 注意：微信 App 内置通话录音（若有）存微信私有目录且为专有格式，拉不到也放不了，
+    请用手机系统录音机的「应用通话录音」；`.slk` 私有编码语音与微信音频缓存不支持；
   - 增量依据 manifest（路径+大小），已入库/非音频文件不会重复拉取；拉取失败下轮自动重试；
   - 首次连接需在手机上确认「允许无线调试？」授权弹窗；容器镜像已内置 adb（android-tools）；
   - 也可用环境变量预置：`VAULT_ADBIMPORT__ENABLED` / `__INTERVALMINUTES` /
