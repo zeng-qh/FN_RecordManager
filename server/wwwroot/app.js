@@ -22,6 +22,7 @@ const state = {
   page: 1,
   pageSize: Number(localStorage.getItem("vv_pagesize")) || 20, // 用户偏好，设置保存后服务端持久化
   loading: false,
+  view: "list", // 当前页面：list 录音列表 / transcribe 转写管理 / upload 录音上传 / speakers 声纹库
   asrEnabled: true, // 与服务端默认开启一致（实际值以 /api/settings 回填为准）
   q: "",
   contact: "",   // 来源分类筛选（电话号码 / 微信联系人）
@@ -793,25 +794,17 @@ async function serverHasSha(sha) {
 // 分片 512KB：弱网上行 30s 内更易传完（平台反代约 30s 会掐断长请求）
 const CHUNK_SIZE = 512 * 1024;
 
-function openUpload() {
-  $("#uploadDone").hidden = true; // 复位完成动画层
-  $("#uploadModal").hidden = false;
-}
-function closeUpload() {
-  $("#uploadModal").hidden = true; // 仅隐藏 UI，后台队列继续跑
-  clearUploadDoneTimers();
-  $("#uploadDone").hidden = true;
-}
+// 上传为独立页面（无弹窗）：队列常驻显示，切到其他页面后任务仍在后台继续跑
 
-// ---- 上传完成动画：全部成功后对钩描边 → 自动关闭弹窗 ----
+// ---- 上传完成动画：全部成功后对钩描边 → 自动隐藏覆盖层（页面保留，可继续添加文件） ----
 let uploadDoneTimers = [];
 function clearUploadDoneTimers() {
   uploadDoneTimers.forEach(clearTimeout);
   uploadDoneTimers = [];
 }
 
-// 队列里没有进行中任务、且无失败项（至少一条成功）时：播对钩动画并自动关窗。
-// 有失败项时保持弹窗打开，保留「续传」入口；显示前二次确认，防止刚加的新文件被打断。
+// 队列里没有进行中任务、且无失败项（至少一条成功）时：播对钩动画后自动隐藏。
+// 有失败项时保持覆盖层不出现，保留「续传」入口；显示前二次确认，防止刚加的新文件被打断。
 function maybeFinishUploads() {
   if (!uploadQueue.length) return;
   if (uploadQueue.some((it) => it.status === "pending" || it.status === "uploading")) return;
@@ -820,17 +813,11 @@ function maybeFinishUploads() {
   uploadDoneTimers.push(setTimeout(() => {
     if (uploadQueue.some((it) => it.status !== "done")) return;
     const done = $("#uploadDone");
-    if (!done || $("#uploadModal").hidden) return;
+    if (!done) return;
     done.hidden = false; // display 切换会重置并重播 CSS 描边动画
-    uploadDoneTimers.push(setTimeout(() => closeUpload(), 2200));
+    uploadDoneTimers.push(setTimeout(() => { done.hidden = true; }, 2200));
   }, 600));
 }
-
-$("#uploadBtn").onclick = openUpload;
-$("#closeUpload").onclick = closeUpload;
-$("#uploadModal").addEventListener("click", (e) => {
-  if (e.target.id === "uploadModal") closeUpload();
-});
 
 const dropZone = $("#dropZone");
 dropZone.onclick = () => $("#uploadInput").click();
@@ -1159,12 +1146,37 @@ function spkRegDate(v) {
 }
 
 function showView(name) {
-  const speakers = name === "speakers";
-  $("#viewList").hidden = speakers;
-  $("#viewSpeakers").hidden = !speakers;
-  $("#speakersBtn").classList.toggle("active", speakers);
-  if (speakers) loadSpeakerLib();
-  else loadRecordings(true);
+  state.view = name;
+  $("#viewList").hidden = name !== "list";
+  $("#viewTranscribe").hidden = name !== "transcribe";
+  $("#viewUpload").hidden = name !== "upload";
+  $("#viewSpeakers").hidden = name !== "speakers";
+  // 顶栏导航按钮高亮当前页
+  $("#tBtn").classList.toggle("active", name === "transcribe");
+  $("#speakersBtn").classList.toggle("active", name === "speakers");
+  $("#uploadBtn").classList.toggle("active", name === "upload");
+  // 搜索 / 多选管理只在录音列表页有意义；上传页没有可刷新的数据
+  $("#search").hidden = name !== "list";
+  $("#manageBtn").hidden = name !== "list";
+  $("#refresh").hidden = name === "upload";
+  // 离开列表页时退出多选模式（回列表时 loadRecordings 会按普通模式重绘）
+  if (name !== "list" && state.selectMode) {
+    state.selectMode = false;
+    state.selected.clear();
+    state.selectedBytes.clear();
+    syncBatchBar();
+  }
+  // 转写页的 3s 轮询只在该页打开期间运行
+  if (name === "transcribe") {
+    tState.open = true;
+    tState.probeTried.clear();
+    refreshTranscribe(true);
+  } else if (tState.open) {
+    tState.open = false;
+    stopTPoll();
+  }
+  if (name === "speakers") loadSpeakerLib();
+  else if (name === "list") loadRecordings(true);
 }
 
 async function loadSpeakerLib() {
@@ -1449,7 +1461,18 @@ async function testConnection() {
 }
 
 // ---- 事件绑定 ----
-$("#refresh").onclick = () => loadRecordings(true);
+// 刷新当前页面：此前固定刷录音列表，导致声纹库页点刷新「没反应」，现按视图分发
+$("#refresh").onclick = () => {
+  if (state.view === "transcribe") {
+    tState.probeTried.clear();
+    refreshTranscribe(true);
+  } else if (state.view === "speakers") {
+    loadSpeakerLib();
+  } else {
+    loadFilters();
+    loadRecordings(true);
+  }
+};
 $("#settingsBtn").onclick = () => openSettings();
 $("#saveSettings").onclick = saveSettings;
 $("#testConn").onclick = testConnection;
@@ -1501,7 +1524,6 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     if (!$("#spkModal").hidden) closeSpkModal();
     else if (!$("#detailModal").hidden) closeDetail();
-    else if (!$("#tModal").hidden) closeTranscribe();
   }
 });
 
@@ -1567,13 +1589,10 @@ $("#settingsModal").addEventListener("click", (e) => {
   if (e.target.id === "settingsModal") closeSettings();
 });
 
-// 声纹库页面视图切换
+// 顶栏导航：转写管理 / 录音上传 / 声纹库 页面切换（录音列表为默认页）
+$("#tBtn").onclick = () => showView("transcribe");
+$("#uploadBtn").onclick = () => showView("upload");
 $("#speakersBtn").onclick = () => showView("speakers");
-$("#spkPageBack").onclick = () => showView("list");
-$("#openSpkPage").onclick = () => {
-  closeSettings();
-  showView("speakers");
-};
 
 // ---- 筛选器（来源分类 / 月份）----
 async function loadFilters() {
@@ -1624,12 +1643,15 @@ $("#clearFilters").onclick = () => {
   loadRecordings(true);
 };
 
-// ---- 转写管理弹窗 ----
+// ---- 转写管理 ----
 // 需求：一键转写全部未转写 / 按来源分组勾选转写 / 「不转写」标记（批量转写自动跳过）/
 // 文件名或正则过滤 / 勾选后按时长估算预计耗时 / 实际耗时展示 / 时长统一 h:mm:ss。
+// 现为独立页面（带分页）：进入页面即刷新，离开页面自动停止轮询（showView 负责）。
 const tState = {
-  open: false,
+  open: false,            // 仅标记「转写管理页当前打开」，控制轮询与回填刷新
   view: "todo",           // todo / pending / done / skip / all
+  page: 1,                // 当前页码（前端分页，过滤后条目切片分组）
+  pageSize: Number(localStorage.getItem("vv_tpagesize")) || 50, // 每页条数偏好
   filter: "",             // 文件名/标题过滤（regex 开关启用正则）
   regex: false,
   items: [],
@@ -1643,18 +1665,6 @@ const tState = {
   probeTried: new Set(),  // 本次会话已尝试探测时长的 id（防失败反复重试）
   backfillBusy: false,
 };
-
-function openTranscribe() {
-  $("#tModal").hidden = false;
-  tState.open = true;
-  tState.probeTried.clear();
-  refreshTranscribe(true);
-}
-function closeTranscribe() {
-  $("#tModal").hidden = true;
-  tState.open = false;
-  stopTPoll();
-}
 
 async function refreshTranscribe(resetSelection = false) {
   if (resetSelection) { tState.selected.clear(); tState.selDuration.clear(); }
@@ -1723,9 +1733,18 @@ function renderTranscribe() {
   $("#tFilter").classList.toggle("err", invalid);
   $("#tFilterHint").textContent = invalid ? "正则表达式无效" : "";
 
+  // 分页：过滤后的条目切片分组（页码越界时自动收敛到最后一页）
+  const filtered = tState.items.filter(tMatch);
+  const totalPages = Math.max(1, Math.ceil(filtered.length / tState.pageSize));
+  if (tState.page > totalPages) tState.page = totalPages;
+  if (tState.page < 1) tState.page = 1;
+  $("#tPageInfo").textContent = `第 ${tState.page} / ${totalPages} 页 · 共 ${filtered.length} 条`;
+  $("#tPrevPage").disabled = tState.page <= 1;
+  $("#tNextPage").disabled = tState.page >= totalPages;
+
   const list = $("#tList");
   list.innerHTML = "";
-  const items = tState.items.filter(tMatch);
+  const items = filtered.slice((tState.page - 1) * tState.pageSize, tState.page * tState.pageSize);
   if (!items.length) {
     list.appendChild(el("div", "t-empty",
       tState.filter ? "没有匹配过滤条件的录音。" : "这里空空如也。"));
@@ -1940,17 +1959,31 @@ async function backfillDurations() {
   } catch { /* 回填失败不影响使用 */ }
 }
 
-// ---- 转写管理事件绑定 ----
-$("#tBtn").onclick = openTranscribe;
-$("#tClose").onclick = closeTranscribe;
-$("#tModal").addEventListener("click", (e) => {
-  if (e.target.id === "tModal") closeTranscribe();
-});
-$("#tView").onchange = (e) => { tState.view = e.target.value; refreshTranscribe(true); };
+// ---- 转写管理事件绑定（独立页面）----
+$("#tView").onchange = (e) => { tState.view = e.target.value; tState.page = 1; refreshTranscribe(true); };
+$("#tPageSize").value = String(tState.pageSize);
+$("#tPageSize").onchange = (e) => {
+  tState.pageSize = Number(e.target.value) || 50;
+  localStorage.setItem("vv_tpagesize", String(tState.pageSize));
+  tState.page = 1;
+  renderTranscribe();
+};
+$("#tPrevPage").onclick = () => {
+  if ($("#tPrevPage").disabled) return;
+  tState.page -= 1;
+  renderTranscribe();
+  $("#tList").scrollTop = 0;
+};
+$("#tNextPage").onclick = () => {
+  if ($("#tNextPage").disabled) return;
+  tState.page += 1;
+  renderTranscribe();
+  $("#tList").scrollTop = 0;
+};
 let tFilterTimer;
 $("#tFilter").oninput = (e) => {
   clearTimeout(tFilterTimer);
-  tFilterTimer = setTimeout(() => { tState.filter = e.target.value; renderTranscribe(); }, 200);
+  tFilterTimer = setTimeout(() => { tState.filter = e.target.value; tState.page = 1; renderTranscribe(); }, 200);
 };
 $("#tRegexChk").onchange = (e) => { tState.regex = e.target.checked; renderTranscribe(); };
 $("#tEnqueueAll").onclick = tEnqueueAll;

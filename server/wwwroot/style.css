@@ -128,16 +128,21 @@ main { flex: 1; padding: 20px; max-width: 900px; width: 100%; margin: 0 auto; }
 .idle-sep { color: var(--muted); }
 .idle-preview { margin-top: 8px; font-size: 12px; color: var(--accent-2); }
 
-/* 网页上传弹层（分片断点续传） */
+/* 录音上传页面（分片断点续传） */
+.upload-panel {
+  position: relative; /* 上传完成动画覆盖层的定位基准 */
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--panel); padding: 16px;
+}
 .drop-zone {
-  margin: 8px 0; padding: 26px 14px; text-align: center;
+  margin: 0 0 12px; padding: 26px 14px; text-align: center;
   border: 2px dashed var(--border); border-radius: 12px;
   background: var(--panel-2); cursor: pointer; transition: border-color .15s, background .15s;
 }
 .drop-zone.drag { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .drop-hint { color: var(--muted); font-size: 13px; line-height: 1.7; }
 .drop-hint small { font-size: 11px; }
-.upload-queue { max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+.upload-queue { max-height: 44vh; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
 .upload-item { padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; }
 .u-name { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .u-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
@@ -151,11 +156,11 @@ main { flex: 1; padding: 20px; max-width: 900px; width: 100%; margin: 0 auto; }
   border: 1px solid var(--danger); border-radius: 8px; background: transparent; color: var(--danger);
 }
 
-/* ---- 上传完成：对钩描边动画（播完由 JS 自动关闭弹窗） ---- */
+/* ---- 上传完成：对钩描边动画（播完由 JS 自动隐藏覆盖层） ---- */
 .upload-done {
   position: absolute; inset: 0; z-index: 5;
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
-  background: var(--panel); border-radius: 16px;
+  background: var(--panel); border-radius: 12px;
   animation: vv-pop 0.25s ease;
 }
 /* 关键：display:flex 的优先级会压过 [hidden] 的 UA 样式（display:none），
@@ -449,14 +454,7 @@ main { flex: 1; padding: 20px; max-width: 900px; width: 100%; margin: 0 auto; }
 }
 .filters button { font-size: 12.5px; padding: 7px 12px; }
 
-/* ---- 转写管理弹窗 ---- */
-.t-card { width: 640px; max-width: 94vw; }
-.t-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
-.t-head h2 { margin: 0; font-size: 18px; }
-.t-head button {
-  background: transparent; border: 1px solid var(--border); color: var(--muted);
-  border-radius: 8px; padding: 4px 10px; cursor: pointer;
-}
+/* ---- 转写管理页面 ---- */
 .t-stats { font-size: 13px; color: var(--muted); margin-bottom: 10px; }
 .t-stats b { color: var(--text); font-weight: 600; }
 .t-speed { opacity: 0.85; }
@@ -482,7 +480,10 @@ main { flex: 1; padding: 20px; max-width: 900px; width: 100%; margin: 0 auto; }
   padding: 8px 14px; border-radius: var(--radius); cursor: pointer; font-size: 13px;
 }
 .t-hint { font-size: 12px; color: var(--danger); }
-.t-list { max-height: 46vh; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+.t-list {
+  max-height: 56vh; min-height: 160px; overflow-y: auto;
+  border: 1px solid var(--border); border-radius: var(--radius);
+}
 .t-empty { padding: 26px; text-align: center; color: var(--muted); font-size: 13px; }
 .t-group + .t-group { border-top: 1px solid var(--border); }
 .t-group-head {
@@ -532,6 +533,19 @@ main { flex: 1; padding: 20px; max-width: 900px; width: 100%; margin: 0 auto; }
 }
 .t-batch button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 
+/* 转写管理分页栏 */
+.t-pagebar {
+  display: flex; align-items: center; justify-content: center; gap: 14px;
+  margin-top: 10px; font-size: 12.5px; color: var(--muted);
+}
+.t-pagebar button {
+  font-size: 12.5px; padding: 6px 14px; cursor: pointer;
+  background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+  border-radius: 8px;
+}
+.t-pagebar button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.t-pagebar button:disabled { opacity: 0.45; cursor: default; }
+
 /* ---- 说话人条（详情页声纹注册入口）---- */
 .d-speakers {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
@@ -576,16 +590,11 @@ main { flex: 1; padding: 20px; max-width: 900px; width: 100%; margin: 0 auto; }
 
 
 
-/* ---- 声纹库页面（主界面独立视图）---- */
+/* ---- 主界面页面头（转写管理 / 录音上传 / 声纹库共用）---- */
+.page-head { display: flex; align-items: center; gap: 14px; }
+.page-head h2 { margin: 0; font-size: 18px; }
+.page-stats { font-size: 12.5px; color: var(--muted); margin-left: auto; }
 .spk-page { display: flex; flex-direction: column; gap: 12px; }
-.spk-page-head { display: flex; align-items: center; gap: 14px; }
-.spk-page-head h2 { margin: 0; font-size: 18px; }
-.spk-page-head button {
-  padding: 6px 14px; cursor: pointer; font-size: 13px;
-  background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; color: var(--text);
-}
-.spk-page-head button:hover { border-color: var(--accent); color: var(--accent); }
-.spk-page-stats { font-size: 12.5px; color: var(--muted); margin-left: auto; }
 .spk-page-body {
   display: grid; grid-template-columns: minmax(260px, 340px) 1fr;
   gap: 14px; align-items: start;
@@ -614,12 +623,7 @@ main { flex: 1; padding: 20px; max-width: 900px; width: 100%; margin: 0 auto; }
 }
 .spk-pd-actions button:hover { border-color: var(--accent); color: var(--accent); }
 .spk-pd-actions button.danger:hover { border-color: var(--danger, #e5484d); color: var(--danger, #e5484d); }
-.spk-page-link {
-  width: 100%; padding: 10px 14px; cursor: pointer; font-size: 13px; text-align: left;
-  background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; color: var(--text);
-}
-.spk-page-link:hover { border-color: var(--accent); color: var(--accent); }
-#speakersBtn.active { border-color: var(--accent); color: var(--accent); }
+#tBtn.active, #uploadBtn.active, #speakersBtn.active { border-color: var(--accent); color: var(--accent); }
 @media (max-width: 860px) {
   .spk-page-body { grid-template-columns: 1fr; }
 }
