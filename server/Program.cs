@@ -8,6 +8,9 @@ using System.Text.Json;
 using VoiceVault.Server.Models;
 using VoiceVault.Server.Services;
 
+// 服务端版本号（/api/health 返回，设置界面展示；发版时更新这里）
+const string AppVersion = "1.2.1";
+
 var builder = WebApplication.CreateBuilder(args);
 
 // 配置来源：appsettings.json + 环境变量（VAULT_ 前缀，嵌套用 __，如 VAULT_ASR__ENABLED）
@@ -190,7 +193,7 @@ api.MapGet("/health", () =>
     {
         status = "ok",
         asr = cfg.Asr.Enabled,
-        version = "1.2.0",
+        version = AppVersion,
         diskFreeBytes = diskFree,
         recordings = count,
         totalBytes = bytes

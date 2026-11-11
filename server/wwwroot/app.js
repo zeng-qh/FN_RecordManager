@@ -1344,7 +1344,7 @@ async function refreshServerStatus() {
     const d = await res.json();
     const gb = d.diskFreeBytes ? (d.diskFreeBytes / 1024 ** 3).toFixed(0) + " GB" : "未知";
     box.textContent =
-      `● 服务器正常 · 磁盘剩余 ${gb} · 录音 ${d.recordings ?? "—"} 条 · 占用 ${fmtSize(d.totalBytes ?? 0)}`;
+      `● 服务器正常 · v${d.version || "—"} · 磁盘剩余 ${gb} · 录音 ${d.recordings ?? "—"} 条 · 占用 ${fmtSize(d.totalBytes ?? 0)}`;
     box.classList.add("ok");
   } catch (e) {
     box.textContent = "● 无法获取服务器状态（请检查地址与令牌）";
