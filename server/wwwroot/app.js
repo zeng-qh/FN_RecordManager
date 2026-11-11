@@ -1633,6 +1633,9 @@ $("#tBtn").onclick = () => showView("transcribe");
 $("#uploadBtn").onclick = () => showView("upload");
 $("#speakersBtn").onclick = () => showView("speakers");
 
+// 点击顶栏品牌（🎙️ 录音保险箱）回到首页：showView("list") 内部会刷新录音列表
+$("#brand").onclick = () => showView("list");
+
 // ---- 筛选器（来源分类 / 月份）----
 async function loadFilters() {
   try {

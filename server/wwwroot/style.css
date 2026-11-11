@@ -66,7 +66,9 @@ body {
   z-index: 10;
 }
 
-.brand { display: flex; align-items: center; gap: 12px; }
+/* 品牌区可点击：任何时候点 🎙️ 录音保险箱 回到首页（录音列表） */
+.brand { display: flex; align-items: center; gap: 12px; cursor: pointer; user-select: none; }
+.brand:hover h1 { color: var(--accent); }
 .brand .logo { font-size: 28px; }
 .brand h1 { font-size: 18px; margin: 0; }
 .brand small { color: var(--muted); font-size: 12px; }
