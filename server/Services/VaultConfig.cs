@@ -98,6 +98,37 @@ public class SpeakerConfig
 }
 
 /// <summary>
+/// 手机无线导入（ADB over WiFi）配置。
+/// 手机开启「无线调试」后，服务端定时经 adb 从手机拉取录音目录自动入库：
+/// 复用上传公共逻辑（SHA-256 去重、来源分类、按转写时机分流），
+/// 增量依据 manifest（remote 路径 + 大小），已入库/不支持的文件不会重复拉取。
+/// </summary>
+public class AdbImportConfig
+{
+    /// <summary>是否启用手机无线导入。默认关闭。</summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>扫描间隔（分钟）。服务端钳制到 5–1440。</summary>
+    public int IntervalMinutes { get; set; } = 30;
+
+    /// <summary>
+    /// 手机地址列表，逗号分隔。推荐填「无线调试」页显示的 IP:端口（端口随开关漂移，
+    /// 变了需更新）；只填 IP 时按默认端口 5555 连接，并尽力通过 mDNS 自动探测端口。
+    /// </summary>
+    public string Hosts { get; set; } = "";
+
+    /// <summary>
+    /// 手机端要拉取的录音目录，逗号分隔。如微信语音
+    /// /sdcard/Android/data/com.tencent.mm/MicroMsg/&lt;账号hash&gt;/voice2
+    /// （具体路径按手机实际为准）。
+    /// </summary>
+    public string RemoteDirs { get; set; } = "";
+
+    /// <summary>adb 可执行文件路径。容器镜像内置 /usr/bin/adb；测试环境可指向 stub。</summary>
+    public string AdbPath { get; set; } = "adb";
+}
+
+/// <summary>
 /// 服务端运行配置，绑定自 appsettings.json 与环境变量（VAULT_ 前缀，嵌套用 __）。
 /// 例：VAULT_TOKEN / VAULT_DATADIR / VAULT_PORT / VAULT_ASR__MODE / VAULT_ASR__IDLESTARTHOUR。
 /// </summary>
@@ -120,6 +151,9 @@ public class VaultConfig
     public RetentionConfig Retention { get; set; } = new();
 
     public SpeakerConfig Speaker { get; set; } = new();
+
+    /// <summary>手机无线导入（ADB over WiFi）配置，网页端可开关。</summary>
+    public AdbImportConfig AdbImport { get; set; } = new();
 
     /// <summary>列表每页条数（用户偏好，网页端设置持久化到 settings.json）。</summary>
     public int PageSize { get; set; } = 20;

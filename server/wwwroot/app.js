@@ -1378,6 +1378,12 @@ async function refreshSettingsForm() {
     $("#cfgRetDays").value = d.retention?.days ?? 0;
     const gb = d.retention?.maxBytes ?? 0;
     $("#cfgRetGb").value = gb > 0 ? Math.max(1, Math.round(gb / (1024 ** 3))) : 0;
+    // 手机无线导入（ADB）回填
+    const ai = d.adbImport || {};
+    $("#cfgAdbEnabled").checked = !!ai.enabled;
+    $("#cfgAdbInterval").value = ai.intervalMinutes ?? 30;
+    $("#cfgAdbHosts").value = ai.hosts || "";
+    $("#cfgAdbDirs").value = ai.remoteDirs || "";
     if (d.pageSize) {
       state.pageSize = d.pageSize; // 以服务端持久化值为准
       localStorage.setItem("vv_pagesize", String(d.pageSize));
@@ -1438,6 +1444,12 @@ async function saveSettings() {
     retention: {
       days: Math.max(0, Number($("#cfgRetDays").value) || 0),
       maxBytes: Math.round(retGb * 1024 ** 3),
+    },
+    adbImport: {
+      enabled: $("#cfgAdbEnabled").checked,
+      intervalMinutes: Math.max(5, Math.min(1440, Number($("#cfgAdbInterval").value) || 30)),
+      hosts: $("#cfgAdbHosts").value.trim(),
+      remoteDirs: $("#cfgAdbDirs").value.trim(),
     },
     pageSize: Math.max(20, Math.min(100, Number($("#cfgPageSize").value) || 20)),
   };

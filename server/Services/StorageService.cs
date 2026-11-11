@@ -29,6 +29,13 @@ public class StorageService
 
     public string RecordingsDir => _recordingsDir;
 
+    /// <summary>文件名是否属于支持的音频格式（ADB 手机导入等内部通道预筛选用）。</summary>
+    public static bool IsSupportedAudio(string fileName)
+    {
+        var ext = Path.GetExtension(fileName);
+        return ext.Length > 0 && AudioExtensions.Contains(ext);
+    }
+
     private static string Sanitize(string name)
     {
         foreach (var c in Path.GetInvalidFileNameChars())

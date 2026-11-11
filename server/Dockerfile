@@ -13,8 +13,8 @@ RUN dotnet publish -c Release -o /app --no-restore \
 # 已设 invariant globalization，无需 ICU；SQLitePCLRaw 自带 musl 原生库，兼容 alpine。
 FROM mcr.microsoft.com/dotnet/aspnet:10.0-alpine AS runtime
 WORKDIR /app
-# curl 仅供容器健康检查（apk 版约 +3MB，远小于 Debian 的 apt 安装）
-RUN apk add --no-cache curl
+# curl 仅供容器健康检查；android-tools 提供 adb，供「手机无线导入」连接手机（约 +10MB）
+RUN apk add --no-cache curl android-tools
 ENV DOTNET_RUNNING_IN_CONTAINER=1 \
     DOTNET_CLI_TELEMETRY_OPTOUT=1 \
     DOTNET_GCHeapHardLimitPercent=70 \

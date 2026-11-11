@@ -28,6 +28,7 @@ if (settingsStore.Load() is { } saved)
     cfg.Retention = saved.Retention;
     if (saved.PageSize > 0) cfg.PageSize = saved.PageSize;
     if (saved.TranscribeSpeed > 0) cfg.TranscribeSpeed = saved.TranscribeSpeed; // 转写速度因子（估算耗时用）
+    if (saved.AdbImport is not null) cfg.AdbImport = saved.AdbImport; // 手机无线导入（ADB）
 }
 
 builder.WebHost.UseUrls($"http://{cfg.Bind}:{cfg.Port}");
@@ -47,6 +48,11 @@ builder.Services.AddSingleton(sp =>
     new ChunkedUploadStore(cfg.DataDir, sp.GetRequiredService<ILogger<ChunkedUploadStore>>()));
 builder.Services.AddSingleton<RetentionCleanup>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<RetentionCleanup>());
+
+// 手机无线导入（ADB over WiFi）：入库委托在 app 构建完成后注入
+// （CompleteRecordingAsync 捕获 upload 公共逻辑，避开工厂 lambda 的明确赋值限制）
+builder.Services.AddSingleton<AdbImportService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<AdbImportService>());
 builder.Services.AddLogging();
 
 // 优雅关闭：给进行中的转写足够时间收尾（默认仅 5s 过短，会被强杀）
@@ -80,7 +86,11 @@ var queue = app.Services.GetRequiredService<TranscriptionQueue>();
 var idle = app.Services.GetRequiredService<IdleScheduler>();
 var chunks = app.Services.GetRequiredService<ChunkedUploadStore>();
 var retention = app.Services.GetRequiredService<RetentionCleanup>();
+var adbImport = app.Services.GetRequiredService<AdbImportService>();
 var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("VoiceVault");
+// 入库管道与网页/客户端上传完全一致（CompleteRecordingAsync 捕获上面的 logger/queue 等变量，
+// 必须在其赋值后再做方法组转换）
+adbImport.Ingest = CompleteRecordingAsync;
 
 // 优雅关闭日志：便于确认容器 stop 时资源已正确释放
 var lifetime = app.Lifetime;
@@ -808,6 +818,7 @@ api.MapGet("/settings", async () => Results.Ok(new
     tokenHint = cfg.Token.Length > 4 ? cfg.Token[..4] + "****" : "****",
     asr = cfg.Asr,
     retention = cfg.Retention,
+    adbImport = cfg.AdbImport,
     pageSize = cfg.PageSize,
     transcribeSpeed = Math.Round(cfg.TranscribeSpeed, 2),
     diarizeReady = await asr.DiarizeReadyAsync()
@@ -827,28 +838,40 @@ api.MapPut("/settings", (StoredSettings incoming) =>
     cfg.Retention.MaxBytes = Math.Max(0, incoming.Retention.MaxBytes);
     cfg.PageSize = Math.Clamp(incoming.PageSize <= 0 ? 20 : incoming.PageSize, 10, 200);
 
+    // 手机无线导入（ADB）：旧前端/旧客户端不带此字段（null）时保留现有值不被清掉
+    if (incoming.AdbImport is { } ai)
+    {
+        cfg.AdbImport.Enabled = ai.Enabled;
+        cfg.AdbImport.IntervalMinutes = Math.Clamp(ai.IntervalMinutes <= 0 ? 30 : ai.IntervalMinutes, 5, 1440);
+        cfg.AdbImport.Hosts = ai.Hosts?.Trim() ?? "";
+        cfg.AdbImport.RemoteDirs = ai.RemoteDirs?.Trim() ?? "";
+        // AdbPath 属部署级配置（容器内路径/测试 stub），仅环境变量或 appsettings 可改
+    }
+
     // 持久化到 settings.json：重启容器配置不丢。
     // TranscribeSpeed 由转写队列按实际耗时自适应维护，这里不接收前端值、只透传当前值。
     try
     {
         settingsStore.Save(new StoredSettings
         {
-            Asr = cfg.Asr, Retention = cfg.Retention,
+            Asr = cfg.Asr, Retention = cfg.Retention, AdbImport = cfg.AdbImport,
             PageSize = cfg.PageSize, TranscribeSpeed = cfg.TranscribeSpeed
         });
     }
     catch (Exception ex) { logger.LogWarning(ex, "Failed to persist settings"); }
 
     logger.LogInformation(
-        "Settings updated: asr={Enabled}, mode={Mode}, idle={S}-{E}, retentionDays={D}, maxBytes={M}, pageSize={P}",
+        "Settings updated: asr={Enabled}, mode={Mode}, idle={S}-{E}, retentionDays={D}, maxBytes={M}, pageSize={P}, adbImport={Adb}",
         cfg.Asr.Enabled, cfg.Asr.Mode, cfg.Asr.IdleStartHour, cfg.Asr.IdleEndHour,
-        cfg.Retention.Days, cfg.Retention.MaxBytes, cfg.PageSize);
+        cfg.Retention.Days, cfg.Retention.MaxBytes, cfg.PageSize,
+        cfg.AdbImport.Enabled ? $"on({cfg.AdbImport.Hosts})" : "off");
 
-    // 保存后立即生效：闲时积压巡检 + 保留策略清理各跑一次
+    // 保存后立即生效：闲时积压巡检 + 保留策略清理 + ADB 导入（开关打开时马上试跑一轮）
     idle.TriggerNow();
     retention.TriggerNow();
+    if (cfg.AdbImport.Enabled) adbImport.TriggerNow();
 
-    return Results.Ok(new { asr = cfg.Asr, retention = cfg.Retention, pageSize = cfg.PageSize });
+    return Results.Ok(new { asr = cfg.Asr, retention = cfg.Retention, adbImport = cfg.AdbImport, pageSize = cfg.PageSize });
 });
 
 /// <summary>将小时裁剪到 [0,23] 合法范围。</summary>

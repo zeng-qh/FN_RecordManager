@@ -14,6 +14,9 @@ public class StoredSettings
 
     /// <summary>转写速度因子（实时倍率，&gt;0）。由服务端按实际转写耗时自适应维护，前端只读。</summary>
     public double TranscribeSpeed { get; set; } = 4.0;
+
+    /// <summary>手机无线导入（ADB）配置。可空以兼容旧版 settings.json（缺省保留部署默认值）。</summary>
+    public AdbImportConfig? AdbImport { get; set; }
 }
 
 /// <summary>

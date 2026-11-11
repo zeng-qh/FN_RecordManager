@@ -179,6 +179,25 @@
           <label>访问令牌 (Token)
             <input id="cfgToken" type="password" placeholder="与服务端 VAULT_TOKEN 一致" />
           </label>
+          <h3>手机导入 (ADB)</h3>
+          <div class="idle-hint">
+            手机开启「无线调试」并连入同一 WiFi 后，服务端定时经 adb 拉取手机里的录音自动入库
+            （SHA 去重，重复文件不占空间，按当前转写时机自动转写）。首次连接需在手机上确认授权弹窗。
+          </div>
+          <label class="row">
+            <input id="cfgAdbEnabled" type="checkbox" /> 启用手机无线导入
+          </label>
+          <label>扫描间隔（分钟）
+            <input id="cfgAdbInterval" type="number" min="5" max="1440" step="5" value="30" />
+          </label>
+          <label>手机地址（逗号分隔）
+            <input id="cfgAdbHosts" type="text" placeholder="192.168.1.20:37891" />
+            <span class="idle-hint">填「无线调试」页显示的 IP:端口最稳（端口会随开关漂移，变了需更新）；只填 IP 则默认 5555 并尝试自动探测。</span>
+          </label>
+          <label>手机端录音目录（逗号分隔）
+            <input id="cfgAdbDirs" type="text" placeholder="/sdcard/Android/data/com.tencent.mm/MicroMsg/…/voice2" />
+            <span class="idle-hint">要备份的手机目录，多个用逗号分隔；微信语音目录请按手机实际路径填写。</span>
+          </label>
           <h3>保留策略</h3>
           <div class="idle-hint">超期或超出容量上限时，自动从最旧的录音开始清理（两项都填 0 表示永久保留全部）。</div>
           <div class="idle-range">
