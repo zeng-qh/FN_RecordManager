@@ -32,13 +32,14 @@ VoiceVault 本地语音转写边车（ASR）
   自动确定人数 1–4，仅在显著分离时才采用。
   模型文件默认找 ./models/campplus.onnx，可用环境变量覆盖：
     ASR_DIARIZE_MODEL        声纹模型 onnx 路径
-    ASR_DIARIZE_THRESHOLD    聚类合并阈值（同人余弦越高，默认 0.65）
+    ASR_DIARIZE_THRESHOLD    聚类合并阈值（同人余弦越高，默认 0.42）
     ASR_DIARIZE_MAX_SPEAKERS 说话人数封顶，超出强制合并最相似簇（默认 8）
     ASR_DIARIZE_F0_DPRIME    F0 分簇的双峰可分辨度阈值（默认 1.5，
                              d'=|Δμ|/sqrt(σ1²+σ2²)，同一人语调波动通常 <1.5）
     ASR_DIARIZE_F0_DELTA     F0 分簇的最小 log 音高差（默认 0.22 ≈ 两簇
-                             中位音高比 1.25x）
-    ASR_DIARIZE_F0_MIN_RATIO F0 分簇的最小占比（默认 0.08，挡离群音高）
+                             中位音高比 1.25x；双峰度 d'≥2.5 时放宽到 0.16）
+    ASR_DIARIZE_F0_MIN_RATIO F0 分簇的最小占比（默认 0.08，挡离群音高；
+                             双峰度 d'≥2.5 时放宽到 0.06）
 
 运行：
   pip install -r requirements.txt

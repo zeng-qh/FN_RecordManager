@@ -10,26 +10,26 @@
 ## 架构
 
 ```
-┌─────────────┐  增量同步(multipart+SHA256)   ┌──────────────────────────┐
-│  手机端      │ ───────────────────────────▶ │  VoiceVault 服务端        │
-│ 安卓App/     │                              │ (.NET 10 Minimal API)    │
-│ Python上传器 │ ◀──── 列表/播放/文字稿 ────── │  · 存储: /data/recordings │
-└─────────────┘                              │  · 元数据: SQLite        │
-                                             │  · 网页端: 内置单页 UI    │
-                                             └───────────┬──────────────┘
-                                                         │ 可选
-                                             ┌───────────▼──────────────┐
-                                             │  ASR 边车 (默认关闭)      │
-                                             │  Python + faster-whisper  │
-                                             │  本地推理，文字稿回写      │
-                                             └──────────────────────────┘
+录音来源（可组合，四选一或并用）          VoiceVault 服务端
+  ├─ 安卓 App (SAF 后台同步)   ──┐        (.NET 10 Minimal API)
+  ├─ Python 上传器 (Termux/PC) ──┼──▶   · 存储: /data/recordings
+  ├─ 网页上传（分片断点续传）    │       · 元数据: SQLite
+  └─ ADB 无线导入（服务端拉取） ──┘       · 网页端: 内置单页 UI
+                                              │ 可选
+                                  ASR 边车 (Python + faster-whisper)
+                                  本地推理，文字稿回写；容器默认不启动
+                                  （compose profiles: ["asr"]，需 --profile asr）
 ```
+
+> **容易混淆的两层「开关」**：转写**功能**默认开启（`VAULT_ASR__ENABLED=true` + 实时模式），
+> 但 ASR **边车容器默认不启动**（内存大户，小设备可按需省略）——只 `docker compose up -d`
+> 时新录音会尝试转写并失败标错，要么 `--profile asr` 启动边车，要么在设置里关掉自动转写。
 
 ## 组件
 
 | 目录 | 说明 | 技术栈 |
 |------|------|--------|
-| `server/` | NAS 端服务：接收上传、SQLite 元数据、网页端、后台转写队列 | C# .NET 10 Minimal API |
+| `server/` | NAS 端服务：接收上传（网页/客户端/ADB 无线导入）、SQLite 元数据、网页端、后台转写队列 | C# .NET 10 Minimal API |
 | `client-cli/` | 跨平台上传器（电脑/树莓派/Termux 均可跑） | Python |
 | `client-android/` | 安卓 App 源码（WorkManager 后台同步） | Kotlin |
 | `asr/` | 可选本地语音转写边车 | Python + faster-whisper |
@@ -102,19 +102,28 @@ WantedBy=multi-user.target
 | `VAULT_DATADIR` | `/data` | 录音/元数据/转写存储根目录（建议挂卷） |
 | `VAULT_PORT` | `8080` | 监听端口 |
 | `VAULT_BIND` | `0.0.0.0` | 监听地址 |
-| `VAULT_ASR__ENABLED` | `false` | 是否启用本地转写 |
-| `VAULT_ASR__MODE` | `Off` | 转写时机：`Off` 关闭 / `Realtime` 实时 / `Idle` 闲时 |
+| `VAULT_ASR__ENABLED` | `true` | 是否启用自动转写（未部署边车时转写失败标错，备份不受影响） |
+| `VAULT_ASR__MODE` | `Realtime` | 转写时机：`Off` 关闭 / `Realtime` 实时 / `Idle` 闲时 |
 | `VAULT_ASR__IDLESTARTHOUR` | `22` | 闲时窗口起始小时（0–23，本地时区） |
 | `VAULT_ASR__IDLEENDHOUR` | `7` | 闲时窗口结束小时（0–23，可小于起始=跨午夜） |
-| `VAULT_ASR__ENDPOINT` | `http://localhost:8000` | ASR 边车地址 |
-| `VAULT_ASR__MODEL` | `small` | Whisper 模型规模 |
-| `VAULT_ASR__SPEAKERDIARIZATION` | `false` | 说话人分段（需边车声纹模型，见下文） |
+| `VAULT_ASR__ENDPOINT` | `http://localhost:8000` | ASR 边车地址（compose 同栈固定 `http://asr:8000`） |
+| `VAULT_ASR__MODEL` | `small` | Whisper 模型规模（compose 针对 2GB 设备已覆盖为 `tiny`） |
+| `VAULT_ASR__SPEAKERDIARIZATION` | `true` | 说话人分段（边车未带声纹模型时自动降级为不标注） |
 | `VAULT_RETENTION__DAYS` | `0` | 录音保留天数，0 = 永久 |
 | `VAULT_RETENTION__MAXBYTES` | `0` | 容量上限（字节），0 = 不限制 |
+| `VAULT_SPEAKER__MATCHTHRESHOLD` | `0.75` | 声纹认名最低相似度（见「声纹注册」节） |
+| `VAULT_SPEAKER__MATCHMARGIN` | `0.05` | 与次佳档案最小差距，不足视为歧义拒绝认名 |
+| `VAULT_ADBIMPORT__ENABLED` | `false` | 手机无线导入开关（见「手机无线导入」节） |
+| `VAULT_ADBIMPORT__INTERVALMINUTES` | `30` | 扫描间隔（分钟，钳制 5–1440） |
+| `VAULT_ADBIMPORT__HOSTS` | （空） | 手机地址，逗号分隔（推荐 IP:端口，纯 IP 默认 5555 + mDNS 探测） |
+| `VAULT_ADBIMPORT__REMOTEDIRS` | （空） | 手机端录音目录，逗号分隔，递归扫描 |
+| `VAULT_ADBIMPORT__ADBPATH` | `adb` | adb 可执行文件路径（容器镜像已内置） |
 
-> **设置持久化**：网页端「设置」保存的 ASR 与保留策略配置会写入
+> **设置持久化**：网页端「设置」保存的 ASR / 保留策略 / ADB 导入 / 每页条数会写入
 > `<DataDir>/settings.json`，重启容器/进程不丢；存在该文件时，其中对应部分
-> 优先于上面的环境变量默认值（旧版仅含 ASR 字段的 settings.json 自动兼容）。
+> **优先于上面的环境变量**——保存过设置后，再改 compose 环境变量不会生效
+> （排查时先看 `<DataDir>/settings.json` 是否存在，删掉该文件或改用页面设置即可）。
+> 旧版仅含 ASR 字段的 settings.json 自动兼容。
 
 ---
 
@@ -129,7 +138,7 @@ WantedBy=multi-user.target
 | 服务端 .NET（空闲） | ~50–80 MB | GC 堆硬上限约 600 MB（见下） |
 | 上传 / 播放峰值 | +50–150 MB | 全程流式处理，不把整段录音读进内存 |
 | 系统 + fnOS | ~400–600 MB | 树莓派 OS 基础占用 |
-| ASR 边车（默认关闭） | 0 | 不启动就不占 |
+| ASR 边车（容器默认不启动） | 0 | 不启动就不占 |
 | **合计（仅服务端）** | **~600–800 MB** | 2GB 设备仍有约 1.2GB 余量 |
 
 > 一旦开启转写（tiny + int8），边车会再占 ~300–500 MB，**small/medium 模型在 2GB 上基本会 OOM，切勿使用**。
@@ -234,8 +243,8 @@ Whisper 推理吃 CPU，Pi 4B（A72 四核 @1.5GHz，无 AVX）与 x86 服务器
   SQLite（WAL）+ 录音文件均为普通文件，快照即可完成备份。
 
 **上传类型白名单**：服务端仅接受常见音频格式
-（m4a/mp3/wav/amr/aac/ogg/flac/opus/webm/3gp），其余类型直接拒绝；
-无扩展名文件沿用旧行为按 `.m4a` 处理。普通上传与分片上传共用此校验。
+（m4a/mp3/wav/amr/aac/ogg/oga/flac/opus/webm/3gp），其余类型（含**无扩展名文件**）直接拒绝；
+普通上传、分片上传与 ADB 导入共用此校验。
 
 ---
 
@@ -271,11 +280,15 @@ python3 voicvault_sync.py \
 
 | 机型 | 常见录音目录 |
 |------|--------------|
-| 小米 / 红米 | `MIUI/sound_recorder/`（通话录音在 `MIUI/sound_recorder/call/`） |
-| 华为 / 荣耀 | `Recordings/`（通话录音 `Recordings/CallRecord/`） |
+| 小米 / 红米 | `MIUI/sound_recorder/`（电话录音 `call_rec/`、应用通话录音=微信通话 `app_rec/`） |
+| 华为 / 荣耀 | `Recordings/`（通话录音子目录名随机型/版本而异，如 `callrecord/`） |
 | OPPO / 一加 | `Recordings/` |
 | vivo / iQOO | `Recordings/` |
-| 三星 | `Recordings/Voice/` |
+| 三星 | `Recordings/` |
+
+> 以手机实际路径为准：录一条音 → 文件管理器长按 → 详情 → 看路径。
+> 微信通话录音由系统录音机「应用通话录音」产生（设置 → 录音机 → 应用通话录音 → 勾选微信），
+> 与普通录音同目录，无需单独配置。
 
 App 里通过 SAF 选中对应目录即可；上传器则把 `--dir` 指向该路径。
 
@@ -305,8 +318,8 @@ python3 client-cli/voicvault_sync.py \
 
 1. `POST /api/upload/init`：上报 `relPath/device/mtime/size/chunkSize/totalChunks`；
    服务端按文件指纹派生 uploadId，**返回已收分片列表**（续传探测）。
-2. `PUT /api/upload/chunk/{id}/{index}`：逐片串行上传（前端 4MB/片，
-   每片失败指数退避重试 3 次），跳过已收分片。
+2. `PUT /api/upload/chunk/{id}/{index}`：逐片串行上传（前端 **512KB/片**——
+   弱网上行 30s 内更易传完，避免被反代掐断；每片失败指数退避重试 3 次），跳过已收分片。
 3. `POST /api/upload/complete/{id}`：服务端校验分片齐全 → 零拷贝顺序拼接 →
    流式计算整文件 SHA-256 → 落盘去重入库（与普通上传同一套逻辑）。
    分片不齐返回 `missing` 列表，补传后重试即可。
@@ -329,7 +342,13 @@ python3 client-cli/voicvault_sync.py \
   📞 **电话号码**（通话录音）与 💬 **微信联系人**（微信录音）各成一类；
   顶栏下拉按分类筛选，详情页可手动修改或清空分类。
 - **按月筛选**：顶栏月份下拉（自动聚合出有录音的月份），快速定位某个月的录音。
-- **每页条数**：设置里可调每页加载条数（20–100），选择持久化保存。
+- **每页条数**：设置里可调每页加载条数（10–200），选择持久化保存。
+- **声纹库页面**：顶栏 🗣️ 进入独立页面——左侧档案卡片（注册名/样本数），
+  右侧详情面板：改名 / 删除 / 注册样本列表 / **出现记录**（该嗓音出现过的
+  全部录音，按时间倒序，点击跳转对应录音详情后可返回声纹库页）。
+  入库统一在录音详情页点说话人标签完成（见「声纹注册」节）。
+- **版本显示**：顶栏品牌区与设置弹窗均显示服务端版本号（取自 `/api/health`，
+  方便确认 compose pull 后是否生效）；点击顶栏 🎙️ 品牌区随时回到录音列表首页。
 - **明暗主题**：设置里切换 深色 / 浅色 / 跟随系统，切换即时生效并记住偏好
   （纯浏览器端偏好，刷新页面不闪色；「跟随系统」随系统明暗实时切换）。
 - **标题与备注**：详情页可直接编辑标题、写备注（参会人、主题等），保存后参与搜索。
@@ -337,7 +356,8 @@ python3 client-cli/voicvault_sync.py \
   （可拖入播放器对齐显示）。
 - **网页上传（推荐，免装 App）**：顶栏 ⬆️ 进入上传页面，拖拽或多选音频直接传；
   队列常驻显示，切到其他页面后任务仍在后台继续。
-  **秒传**：选中文件先在浏览器本地计算 SHA-256 并向服务端探测，
+  **秒传**：选中文件先在浏览器本地计算 SHA-256 并向服务端探测
+  （超过 512MB 的大文件跳过本地计算，直接走分片上传），
   服务器已有同内容文件（含手机端传过的）直接标记「⚡ 秒传」跳过上传；
   内置**断点续传**：文件按 512KB 分片串行上传，逐片指数退避重试；
   断网、刷新页面、换浏览器后再次选择同一文件，**只补传缺失分片**，
@@ -478,38 +498,77 @@ docker run -d --name voicvault-asr -p 8000:8000 --restart unless-stopped \
   认名。**同记录内一对一分配**：同一录音的多个簇共享信道、彼此相似度
   偏高（真不同人簇间 0.68–0.86），故每个档案在同一条记录内至多被一个
   簇认领（全局降序贪心），某档案删除后其"邻居簇"不会被错误认领。
-- **管理**：设置页「声纹库」可改名（同名改名即合并档案）、删除
+- **管理**：顶栏 🗣️ **声纹库页面**可改名（同名改名即合并档案）、删除
   （历史记录恢复显示「说话人N」）；删除录音时其注册样本级联清理。
 
 ## API 概览（Bearer Token 鉴权）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/health` | 探活（免鉴权） |
+| GET | `/api/health` | 探活（免鉴权；返回版本号/磁盘水位/录音总数） |
 | POST | `/api/sync/diff` | 增量求差，返回待上传清单 |
 | POST | `/api/upload` | 上传单个录音（multipart，校验 SHA-256；按转写时机决定立即入队或标记待闲时） |
+| POST | `/api/upload/exists` | 秒传探测：批量查询 SHA-256 是否已存在 |
 | POST | `/api/upload/init` | 分片上传初始化/续传探测，返回 uploadId 与已收分片列表 |
 | PUT | `/api/upload/chunk/{id}/{index}` | 上传单个分片（原始字节流，原子落盘，重传幂等） |
 | POST | `/api/upload/complete/{id}` | 校验分片齐全 → 零拷贝拼接 → 流式算 SHA → 入库去重 |
-| GET | `/api/recordings` | 列表（分页/时间范围/关键词） |
+| GET | `/api/stats` | 全库统计（总条数/已转写/总时长/总占用） |
+| GET | `/api/contacts` | 来源分类聚合（联系人/号码 → 条数，分类下拉） |
+| GET | `/api/months` | 有录音的月份聚合（月份下拉） |
+| GET | `/api/recordings` | 列表（分页/时间范围/关键词/来源筛选） |
 | GET | `/api/recordings/{id}` | 详情 |
-| PATCH | `/api/recordings/{id}` | 更新标题/备注（null 不改，空串清空；备注参与搜索） |
+| PATCH | `/api/recordings/{id}` | 更新标题/备注/分类（null 不改，空串清空；备注参与搜索） |
 | DELETE | `/api/recordings/{id}` | 删除录音（含落盘文件与文字稿；注册声纹样本级联清理） |
+| POST | `/api/recordings/batch-delete` | 批量删除（多选管理） |
+| GET | `/api/recordings/export/zip?ids=` | 打包 ZIP 导出选中录音 |
+| POST | `/api/recordings/durations` | 前端探测到的时长批量回填 |
 | GET | `/api/recordings/{id}/file` | 音频流（支持 Range，`?token=` 等价凭证） |
 | GET | `/api/recordings/{id}/transcript` | 文字稿（未就绪返回 404 + 状态，状态含 `idle` 待闲时；响应实时注入注册名） |
 | GET | `/api/recordings/{id}/transcript/export` | 导出 `?format=txt\|srt`（TXT 带时间戳 / SRT 字幕） |
 | POST | `/api/recordings/{id}/transcribe` | 立即转写单条（重置重试计数，不受闲时窗口限制） |
+| POST | `/api/transcribe/pending` | 批量转写：全部未完成录音一次性入队 |
+| GET | `/api/transcribe/list` | 转写管理页列表（按状态筛选 + 分组统计 + 分页） |
+| POST | `/api/transcribe/enqueue` | 按指定 id 批量入队（转写管理的勾选/整组转写） |
+| POST | `/api/transcribe/skip` | 设置/取消「🚫 不转写」标记（批量） |
 | GET | `/api/speakers` | 声纹库列表（档案 + 样本来源） |
+| GET | `/api/speakers/{id}/occurrences` | 该声纹的出现记录（遍历全部转写簇向量比对，按录音时间倒序） |
 | POST | `/api/speakers` | 声纹注册 `{name, recordId, speakerLabel}`——从录音说话人标注提取声纹 |
 | PATCH | `/api/speakers/{id}` | 声纹改名（同名即合并档案） |
 | DELETE | `/api/speakers/{id}` | 删除声纹档案（历史记录恢复匿名标签） |
-| POST | `/api/transcribe/pending` | 批量转写：全部未完成录音一次性入队 |
-| GET/PUT | `/api/settings` | 读取 / 修改设置（`asr`、`retention`；PUT 落盘持久化并立即生效） |
+| GET/PUT | `/api/settings` | 读取 / 修改设置（asr / retention / adbImport / pageSize；PUT 落盘持久化并立即生效） |
 
 ## 隐私
 
 - 录音与转写文本只存你自己的 NAS，不经过任何第三方云。
 - 转写（若启用）全程在 NAS 本地用 faster-whisper 推理。
+
+## 已知不一致与待确认事项
+
+代码全面核对后记录的问题与待实机确认点（更新前先过一遍）：
+
+1. **来源分类依赖文件名**：自动分类靠路径/文件名关键词——目录或文件名含
+   「微信/WeChat/weixin」→ 微信联系人；文件名含 11 位手机号 → 电话号码。
+   小米 `app_rec/`（应用通话录音=微信通话）产物文件名是否带微信标记或手机号
+   **未实机验证**；各机型通话录音命名差异大，未命中规则的录音会归「未分类」
+   （详情页可手动改分类，持久保存）。
+2. **settings.json 优先级副作用**：网页端保存过设置后，ASR / 保留策略 / ADB
+   导入 / 每页条数以 settings.json 为准，**此后修改 compose 环境变量不再生效**
+   （删除该文件或改用页面设置可恢复）。排查「改了 compose 没效果」先查
+   `<DataDir>/settings.json` 是否存在。
+3. **转写模型默认值分两层**：代码默认 `small`；compose 针对 2GB 设备显式覆盖为
+   `tiny`。x86 / 4GB 设备按上文建议在 `.env` 调整 `VAULT_ASR_MODEL`。
+4. **边车内存护栏与 small 模型冲突**：compose 默认 `ASR_MEMLIMIT=1024m`，跑
+   small（推理峰值 ~1GB+）会被反复 OOM kill、转写失败重试——4GB 设备务必设
+   `ASR_MEMLIMIT=2048m`（详见树莓派部署节）。
+5. **微信私有格式不支持**：微信 App 内置通话录音（若灰度到）存微信私有目录且
+   为专有格式，ADB 拉不到也放不了；`.slk`（silk 编码）语音消息与微信音频缓存
+   同样不支持。微信通话录音请用系统录音机「应用通话录音」（标准 m4a/wav）。
+6. **安卓 APK 未签名**：CI 产出 `app-release-unsigned.apk`，需自行 apksigner
+   签名后安装（签名流水线在「建设性建议」清单中）。
+7. **多选/搜索仅列表页**：批量管理（☑️）与搜索框只在录音列表页显示，切到
+   转写/上传/声纹库页面自动隐藏并退出多选模式——设计如此，非遗漏。
+8. **ADB 导入的转写状态**：导入入库与网页上传走同一管道，Realtime 模式下
+   ADB 拉取的录音也会立即排队转写；闲时模式则标记「待闲时」，夜间消化。
 
 ## 路线图
 
