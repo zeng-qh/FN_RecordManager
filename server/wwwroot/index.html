@@ -5,6 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>录音保险箱 · VoiceVault</title>
   <link rel="stylesheet" href="style.css" />
+  <script>
+    // 尽早应用主题（在 CSS 渲染前设置 data-theme，避免浅色用户刷新时闪一下深色）
+    (function () {
+      var t = localStorage.getItem("vv_theme") || "dark";
+      if (t === "system") t = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+      document.documentElement.dataset.theme = t;
+    })();
+  </script>
 </head>
 <body>
   <header class="topbar">
@@ -156,6 +164,14 @@
       <div id="srvStatus" class="srv-status">服务器状态加载中…</div>
       <div class="settings-grid">
         <div class="settings-col">
+          <h3>外观</h3>
+          <label>界面主题
+            <select id="cfgTheme" title="切换后立即生效并记住偏好">
+              <option value="dark">深色（默认）</option>
+              <option value="light">浅色</option>
+              <option value="system">跟随系统</option>
+            </select>
+          </label>
           <h3>连接</h3>
           <label>服务器地址
             <input id="cfgServer" type="text" placeholder="http://192.168.1.10:8080" />

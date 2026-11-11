@@ -2,6 +2,32 @@
 
 const LS_SERVER = "vv_server";
 const LS_TOKEN = "vv_token";
+const LS_THEME = "vv_theme"; // dark / light / system（head 内联脚本已在渲染前应用过一次）
+
+// ---- 明暗主题 ----
+// 三档偏好：深色（默认，保持原有观感）/ 浅色 / 跟随系统。
+// system 档跟随操作系统的明暗设置变化，系统切换时页面实时跟随。
+const themeMedia = window.matchMedia("(prefers-color-scheme: light)");
+
+function applyTheme() {
+  const pref = localStorage.getItem(LS_THEME) || "dark";
+  const eff = pref === "system" ? (themeMedia.matches ? "light" : "dark") : pref;
+  document.documentElement.dataset.theme = eff;
+  const sel = $("#cfgTheme"); // 设置弹窗开着时同步下拉显示
+  if (sel) sel.value = pref;
+}
+
+// 设置弹窗里的主题下拉：切换立即生效并记住（无需点保存）
+function initTheme() {
+  applyTheme();
+  $("#cfgTheme").onchange = (e) => {
+    localStorage.setItem(LS_THEME, e.target.value);
+    applyTheme();
+  };
+  themeMedia.addEventListener("change", () => {
+    if ((localStorage.getItem(LS_THEME) || "dark") === "system") applyTheme();
+  });
+}
 
 // URL ?token= 自动保存：部署完成后打开 http://<ip>:8080/?token=<令牌> 即免填直接进入。
 // URL 值始终覆盖旧值（换令牌时新链接即时生效）；随后只从地址栏移除 token 参数，
@@ -1124,6 +1150,7 @@ function openSettings(msg) {
   $("#cfgServer").value = state.server;
   $("#cfgToken").value = state.token;
   $("#settingsModal").hidden = false;
+  applyTheme(); // 主题下拉回显当前偏好（可能被其他标签页改过）
   if (msg) setStatus(msg);
   refreshSettingsForm();
 }
@@ -1475,6 +1502,7 @@ $("#refresh").onclick = () => {
 };
 $("#settingsBtn").onclick = () => openSettings();
 $("#saveSettings").onclick = saveSettings;
+initTheme(); // 明暗主题：绑定设置下拉 + 跟随系统监听
 $("#testConn").onclick = testConnection;
 $("#cfgAsrMode").onchange = syncIdleWindowBox;
 $("#cfgAsrIdleStart").oninput = updateIdlePreview;
