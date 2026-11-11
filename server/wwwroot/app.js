@@ -1503,6 +1503,17 @@ $("#refresh").onclick = () => {
 $("#settingsBtn").onclick = () => openSettings();
 $("#saveSettings").onclick = saveSettings;
 initTheme(); // 明暗主题：绑定设置下拉 + 跟随系统监听
+
+// 顶栏版本号：展示服务端部署版本（health 为匿名接口，走裸 fetch 静默失败，
+// 不经 api() 以免 401 触发设置引导弹窗——首次使用未配令牌时不打扰）
+(async () => {
+  try {
+    const res = await fetch(state.server.replace(/\/$/, "") + "/api/health");
+    if (!res.ok) return;
+    const d = await res.json();
+    if (d.version) $("#brandVersion").textContent = " · v" + d.version;
+  } catch (e) { /* 服务器不可达时顶栏不显示版本 */ }
+})();
 $("#testConn").onclick = testConnection;
 $("#cfgAsrMode").onchange = syncIdleWindowBox;
 $("#cfgAsrIdleStart").oninput = updateIdlePreview;
