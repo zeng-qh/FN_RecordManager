@@ -19,6 +19,7 @@
       <input id="search" type="search" placeholder="搜索文件名 / 标题…" />
       <button id="manageBtn" title="多选管理">☑️</button>
       <button id="tBtn" title="转写管理">🎯</button>
+      <button id="speakersBtn" title="声纹库">🗣️</button>
       <button id="uploadBtn" title="上传录音">⬆️</button>
       <button id="refresh" title="刷新">🔄</button>
       <button id="settingsBtn" title="设置">⚙️</button>
@@ -35,17 +36,41 @@
   </div>
 
   <main>
-    <div class="filters">
-      <select id="contactFilter" title="按来源分类（电话号码 / 微信联系人）">
-        <option value="">全部来源</option>
-      </select>
-      <select id="monthFilter" title="按录音月份筛选">
-        <option value="">全部时间</option>
-      </select>
-      <button id="clearFilters" title="清空筛选" hidden>✕ 清除筛选</button>
-    </div>
-    <div id="status" class="status"></div>
-    <div id="timeline" class="timeline"></div>
+    <!-- 视图：录音列表 -->
+    <section id="viewList">
+      <div class="filters">
+        <select id="contactFilter" title="按来源分类（电话号码 / 微信联系人）">
+          <option value="">全部来源</option>
+        </select>
+        <select id="monthFilter" title="按录音月份筛选">
+          <option value="">全部时间</option>
+        </select>
+        <button id="clearFilters" title="清空筛选" hidden>✕ 清除筛选</button>
+      </div>
+      <div id="status" class="status"></div>
+      <div id="timeline" class="timeline"></div>
+    </section>
+
+    <!-- 视图：声纹库（说话人注册与出现记录） -->
+    <section id="viewSpeakers" hidden>
+      <div class="spk-page">
+        <div class="spk-page-head">
+          <button id="spkPageBack" title="返回录音列表">← 返回列表</button>
+          <h2>声纹库</h2>
+          <div id="spkPageStats" class="spk-page-stats"></div>
+        </div>
+        <div class="idle-hint">
+          在录音详情页点说话人标签（如「说话人1 📌」）即可注册声纹；注册后所有记录里
+          同一嗓音自动显示真名。同一人多条录音可反复标注加固识别。
+        </div>
+        <div class="spk-page-body">
+          <div id="spkPageList" class="spk-page-list"></div>
+          <div id="spkPageDetail" class="spk-page-detail">
+            <div class="spk-empty">← 选择一个声纹查看注册样本与出现记录</div>
+          </div>
+        </div>
+      </div>
+    </section>
   </main>
 
   <footer class="player" id="playerBar" hidden>
@@ -185,10 +210,10 @@
           </label>
           <h3>声纹库</h3>
           <div class="idle-hint">
-            在录音详情页点说话人标签，把「说话人N」标注成真名（如：张三）。
-            注册后，所有记录里同一嗓音会自动显示为该名字；同一人多条录音可反复标注加固识别。
+            在录音详情页点说话人标签，把「说话人N」标注成真名。注册后所有记录里
+            同一嗓音自动显示该名字；改名/删除即时作用于全部历史记录。
           </div>
-          <div id="spkList" class="spk-list"></div>
+          <button id="openSpkPage" class="spk-page-link">🗣️ 打开声纹库页面（档案 / 标注 / 出现记录）</button>
         </div>
       </div>
       <div class="modal-actions">
@@ -196,25 +221,6 @@
         <button id="testConn">测试连接</button>
         <button id="saveSettings" class="primary">保存</button>
       </div>
-    </div>
-  </div>
-
-  <!-- 声纹详情：注册样本 + 出现记录，可跳转录音继续标注 -->
-  <div id="spkDetailModal" class="modal" hidden>
-    <div class="modal-card spk-card">
-      <div class="spk-card-head">
-        <h2 id="spkDetailTitle">—</h2>
-        <button id="spkDetailClose" title="关闭">✕</button>
-      </div>
-      <div class="spk-card-actions">
-        <button id="spkRename">改名</button>
-        <button id="spkDelete">删除声纹</button>
-      </div>
-      <h3>注册样本</h3>
-      <div id="spkDetailSamples" class="spk-list"></div>
-      <h3>出现的录音</h3>
-      <div class="idle-hint">按注册声纹比对全部记录的说话人簇（阈值内即列出）；点击跳转详情可继续标注或试听。</div>
-      <div id="spkOccurrences" class="spk-occ-list"><div class="spk-empty">加载中…</div></div>
     </div>
   </div>
 

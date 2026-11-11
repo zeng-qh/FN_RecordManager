@@ -1144,71 +1144,100 @@ function closeSettings() {
   $("#settingsModal").hidden = true;
 }
 
-// ---- 声纹库（设置页管理）----
+// ---- 声纹库页面（主界面独立视图：档案卡片 + 详情面板）----
+let spkCurrent = null; // 当前选中的档案（详情面板渲染/改名/删除用）
+
+// createdAt 兼容解析：服务端返回 ISO 字符串或时间戳（秒/毫秒），统一转毫秒
+function parseTs(v) {
+  if (typeof v === "number") return v < 1e12 ? v * 1000 : v;
+  if (typeof v === "string") { const t = Date.parse(v); return isNaN(t) ? 0 : t; }
+  return 0;
+}
+function spkRegDate(v) {
+  const ms = parseTs(v);
+  return ms ? "注册于 " + fmtDate(ms / 1000) : "";
+}
+
+function showView(name) {
+  const speakers = name === "speakers";
+  $("#viewList").hidden = speakers;
+  $("#viewSpeakers").hidden = !speakers;
+  $("#speakersBtn").classList.toggle("active", speakers);
+  if (speakers) loadSpeakerLib();
+  else loadRecordings(true);
+}
+
 async function loadSpeakerLib() {
-  const box = $("#spkList");
+  const box = $("#spkPageList");
   if (!box) return;
   try {
     const res = await api("/api/speakers");
     if (!res.ok) throw new Error("HTTP " + res.status);
     const d = await res.json();
     const items = d.items || [];
-    if (!items.length) {
-      box.innerHTML = '<div class="spk-empty">暂无注册声纹。打开任一条已转写录音，点文字稿上方的说话人标签即可注册。</div>';
-      return;
-    }
-    box.innerHTML = "";
+    const nSamples = items.reduce((n, p) => n + (p.samples || []).length, 0);
+    $("#spkPageStats").textContent = items.length
+      ? `${items.length} 个档案 · ${nSamples} 个注册样本`
+      : "";
+    box.innerHTML = items.length
+      ? ""
+      : '<div class="spk-empty">暂无注册声纹。打开任一条已转写录音，点文字稿上方的说话人标签即可注册。</div>';
+    let prev = null;
     for (const p of items) {
-      const row = el("div", "spk-row");
-      row.title = "点击查看声纹详情与出现记录";
-      const sources = (p.samples || [])
-        .map((s) => (s.recordId ? `#${s.recordId}` : "外部"))
+      const card = el("div", "spk-pcard");
+      const sources = [...new Set((p.samples || []).map((s) => `#${s.recordId}`))]
+        .filter((s) => s !== "#null")
         .join("、");
-      row.innerHTML =
+      card.innerHTML =
         `<span class="spk-avatar">🗣️</span>` +
         `<span class="spk-info"><b>${escapeHtml(p.name)}</b>` +
         `<small>${(p.samples || []).length} 个样本${sources ? " · 来自 " + escapeHtml(sources) : ""}</small></span>`;
-      row.onclick = () => openSpkDetail(p); // 整行可点：进入声纹详情（标注/出现记录）
-      const edit = el("button", "spk-act", "✏️");
-      edit.title = "改名";
-      edit.onclick = async (ev) => {
-        ev.stopPropagation(); // 行本身可点开详情，按钮别冒泡
-        const name = prompt("修改声纹名字（改名后全库记录立即按新名字显示）：", p.name);
-        if (!name || name.trim() === p.name) return;
-        const r2 = await api(`/api/speakers/${p.id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: name.trim() }),
-        });
-        if (r2.ok) { setStatus(`声纹已改名：${p.name} → ${name.trim()}`); loadSpeakerLib(); }
-        else { const e2 = await r2.json().catch(() => ({})); alert("改名失败：" + (e2.error || r2.status)); }
-      };
-      const del = el("button", "spk-act", "🗑");
-      del.title = "删除（历史记录恢复显示「说话人N」）";
-      del.onclick = async (ev) => {
-        ev.stopPropagation();
-        if (!confirm(`删除声纹「${p.name}」？所有记录里该名字将恢复为「说话人N」。`)) return;
-        const r2 = await api(`/api/speakers/${p.id}`, { method: "DELETE" });
-        if (r2.ok) { setStatus(`已删除声纹「${p.name}」`); loadSpeakerLib(); }
-        else { const e2 = await r2.json().catch(() => ({})); alert("删除失败：" + (e2.error || r2.status)); }
-      };
-      row.appendChild(edit);
-      row.appendChild(del);
-      box.appendChild(row);
+      card.onclick = () => selectSpeakerProfile(p, card);
+      if (spkCurrent && spkCurrent.id === p.id) {
+        prev = p; // 重渲染后保持选中（改名/删除/注册样本刷新场景）
+        card.classList.add("selected");
+      }
+      box.appendChild(card);
+    }
+    // 保持选中：用新数据重渲染详情面板；无选中时默认选第一个
+    const target = prev || items[0];
+    if (target) {
+      const card = [...box.children][items.indexOf(target)];
+      selectSpeakerProfile(target, card);
+    } else {
+      spkCurrent = null;
+      $("#spkPageDetail").innerHTML =
+        '<div class="spk-empty">暂无声纹档案。在录音详情页点说话人标签即可注册。</div>';
     }
   } catch (e) {
-    box.innerHTML = '<div class="spk-empty">声纹库加载失败（服务器未升级到支持声纹注册的版本？）</div>';
+    box.innerHTML = '<div class="spk-empty">声纹库加载失败（请检查服务器连接）</div>';
   }
 }
 
-// ---- 声纹详情弹窗（声纹库点档案进入：改名/删除/样本/出现记录）----
-let spkCurrent = null; // 当前打开的档案（改名/删除按钮要用）
-
-function openSpkDetail(p) {
+function selectSpeakerProfile(p, cardEl) {
   spkCurrent = p;
-  $("#spkDetailTitle").textContent = p.name;
+  // 选中态
+  [...$("#spkPageList").children].forEach((c) => c.classList.remove("selected"));
+  if (cardEl) cardEl.classList.add("selected");
+
+  const panel = $("#spkPageDetail");
   const samples = p.samples || [];
-  const sBox = $("#spkDetailSamples");
+  panel.innerHTML = `
+    <div class="spk-pd-head">
+      <span class="spk-avatar">🗣️</span>
+      <div class="spk-pd-title"><b>${escapeHtml(p.name)}</b><small>${spkRegDate(p.createdAt)}</small></div>
+      <div class="spk-pd-actions">
+        <button id="spkRename">✏️ 改名</button>
+        <button id="spkDelete" class="danger">🗑 删除</button>
+      </div>
+    </div>
+    <h3>注册样本</h3>
+    <div id="spkDetailSamples" class="spk-occ-list"></div>
+    <h3>出现的录音</h3>
+    <div class="idle-hint">按注册声纹比对全部记录的说话人簇（阈值内即列出）；点击跳转详情可继续标注或试听。</div>
+    <div id="spkOccurrences" class="spk-occ-list"><div class="spk-empty">加载中…</div></div>`;
+
+  const sBox = panel.querySelector("#spkDetailSamples");
   sBox.innerHTML = samples.length
     ? ""
     : '<div class="spk-empty">无样本（异常状态，建议删除后重新注册）</div>';
@@ -1217,21 +1246,15 @@ function openSpkDetail(p) {
     r.innerHTML =
       `<span class="spk-occ-name">${s.recordId ? "录音 #" + s.recordId : "外部提取"}</span>` +
       `<small>${escapeHtml(s.segLabel || "")}${s.recordId ? " · 点击打开详情" : ""}</small>`;
-    if (s.recordId)
-      r.onclick = async () => {
-        $("#spkDetailModal").hidden = true;
-        $("#settingsModal").hidden = true;
-        await openDetail(s.recordId);
-      };
+    if (s.recordId) r.onclick = () => openDetail(s.recordId);
     sBox.appendChild(r);
   }
-  const oBox = $("#spkOccurrences");
-  oBox.innerHTML = '<div class="spk-empty">加载中…</div>';
-  $("#spkDetailModal").hidden = false;
+
+  const oBox = panel.querySelector("#spkOccurrences");
   api(`/api/speakers/${p.id}/occurrences`)
     .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
     .then((d) => {
-      if (spkCurrent !== p) return; // 弹窗已切走，丢弃过期响应
+      if (spkCurrent !== p) return; // 已切换到其他档案，丢弃过期响应
       const items = d.items || [];
       oBox.innerHTML = items.length
         ? ""
@@ -1240,24 +1263,37 @@ function openSpkDetail(p) {
         const r = el("div", "spk-occ-row");
         r.innerHTML =
           `<span class="spk-occ-name">${escapeHtml(it.title || "录音 #" + it.recordId)}</span>` +
-          `<small>${fmtDate(it.recordedAt)} · ${escapeHtml(it.label || "")} · 相似 ${(it.score * 100).toFixed(0)}% · 点击打开</small>`;
-        r.onclick = async () => {
-          $("#spkDetailModal").hidden = true;
-          $("#settingsModal").hidden = true;
-          await openDetail(it.recordId);
-        };
+          `<small>${fmtDate(parseTs(it.recordedAt) / 1000)} · ${escapeHtml(it.label || "")} · 相似 ${(it.score * 100).toFixed(0)}%</small>`;
+        r.onclick = () => openDetail(it.recordId);
         oBox.appendChild(r);
       }
     })
     .catch(() => {
       if (spkCurrent === p)
-        oBox.innerHTML = '<div class="spk-empty">出现记录加载失败（服务器未升级？）</div>';
+        oBox.innerHTML = '<div class="spk-empty">出现记录加载失败（请检查服务器连接）</div>';
     });
-}
 
-function closeSpkDetail() {
-  spkCurrent = null;
-  $("#spkDetailModal").hidden = true;
+  panel.querySelector("#spkRename").onclick = async () => {
+    const name = prompt("修改声纹名字（改名后全库记录立即按新名字显示）：", p.name);
+    if (!name || name.trim() === p.name) return;
+    try {
+      const r2 = await api(`/api/speakers/${p.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: name.trim() }),
+      });
+      if (r2.ok) { setStatus(`声纹已改名：${p.name} → ${name.trim()}`); loadSpeakerLib(); }
+      else { const e2 = await r2.json().catch(() => ({})); alert("改名失败：" + (e2.error || r2.status)); }
+    } catch (e) { alert("改名失败：" + e.message); }
+  };
+  panel.querySelector("#spkDelete").onclick = async () => {
+    if (!confirm(`删除声纹「${p.name}」？所有记录里该名字将恢复为「说话人N」。`)) return;
+    try {
+      const r2 = await api(`/api/speakers/${p.id}`, { method: "DELETE" });
+      if (r2.ok) { setStatus(`已删除声纹「${p.name}」`); spkCurrent = null; loadSpeakerLib(); }
+      else { const e2 = await r2.json().catch(() => ({})); alert("删除失败：" + (e2.error || r2.status)); }
+    } catch (e) { alert("删除失败：" + e.message); }
+  };
 }
 
 // 设置弹窗顶部：服务器状态水位（health 接口，无需敏感信息）
@@ -1280,7 +1316,6 @@ async function refreshServerStatus() {
 async function refreshSettingsForm() {
   // 服务器状态水位（磁盘 / 条数 / 占用），失败静默
   refreshServerStatus();
-  loadSpeakerLib(); // 声纹库列表（设置页常驻区块）
   // 拉取 ASR 配置回填
   try {
     const res = await api("/api/settings");
@@ -1465,7 +1500,6 @@ $("#detailModal").addEventListener("click", (e) => {
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     if (!$("#spkModal").hidden) closeSpkModal();
-    else if (!$("#spkDetailModal").hidden) closeSpkDetail();
     else if (!$("#detailModal").hidden) closeDetail();
     else if (!$("#tModal").hidden) closeTranscribe();
   }
@@ -1533,46 +1567,12 @@ $("#settingsModal").addEventListener("click", (e) => {
   if (e.target.id === "settingsModal") closeSettings();
 });
 
-// 声纹详情弹窗事件
-$("#spkDetailClose").onclick = closeSpkDetail;
-$("#spkDetailModal").addEventListener("click", (e) => {
-  if (e.target.id === "spkDetailModal") closeSpkDetail();
-});
-$("#spkRename").onclick = async () => {
-  if (!spkCurrent) return;
-  const name = prompt("修改声纹名字（改名后全库记录立即按新名字显示）：", spkCurrent.name);
-  if (!name || name.trim() === spkCurrent.name) return;
-  try {
-    const r = await api(`/api/speakers/${spkCurrent.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: name.trim() }),
-    });
-    if (r.ok) {
-      setStatus(`声纹已改名：${spkCurrent.name} → ${name.trim()}`);
-      $("#spkTitle").textContent = name.trim();
-      spkCurrent = { ...spkCurrent, name: name.trim() };
-      loadSpeakerLib();
-    } else {
-      const e2 = await r.json().catch(() => ({}));
-      alert("改名失败：" + (e2.error || r.status));
-    }
-  } catch (e) { alert("改名失败：" + e.message); }
-};
-$("#spkDelete").onclick = async () => {
-  if (!spkCurrent) return;
-  if (!confirm(`删除声纹「${spkCurrent.name}」？所有记录里该名字将恢复为「说话人N」。`)) return;
-  try {
-    const r = await api(`/api/speakers/${spkCurrent.id}`, { method: "DELETE" });
-    if (r.ok) {
-      setStatus(`已删除声纹「${spkCurrent.name}」`);
-      closeSpkDetail();
-      loadSpeakerLib();
-    } else {
-      const e2 = await r.json().catch(() => ({}));
-      alert("删除失败：" + (e2.error || r.status));
-    }
-  } catch (e) { alert("删除失败：" + e.message); }
+// 声纹库页面视图切换
+$("#speakersBtn").onclick = () => showView("speakers");
+$("#spkPageBack").onclick = () => showView("list");
+$("#openSpkPage").onclick = () => {
+  closeSettings();
+  showView("speakers");
 };
 
 // ---- 筛选器（来源分类 / 月份）----
