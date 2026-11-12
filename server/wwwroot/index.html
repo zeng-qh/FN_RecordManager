@@ -50,9 +50,14 @@
         <select id="contactFilter" title="按来源分类（电话号码 / 微信联系人）">
           <option value="">全部来源</option>
         </select>
-        <select id="monthFilter" title="按录音月份筛选">
+        <select id="monthFilter" title="按时间筛选录音">
           <option value="">全部时间</option>
         </select>
+        <span id="customRange" class="custom-range" hidden>
+          <input id="dateFrom" type="date" title="起始日期（留空不限）" />
+          <span class="range-sep">→</span>
+          <input id="dateTo" type="date" title="结束日期（留空不限）" />
+        </span>
         <button id="clearFilters" title="清空筛选" hidden>✕ 清除筛选</button>
       </div>
       <div id="status" class="status"></div>

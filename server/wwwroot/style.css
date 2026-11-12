@@ -486,6 +486,19 @@ main { flex: 1; padding: 20px; max-width: 900px; width: 100%; margin: 0 auto; }
 }
 .filters button { font-size: 12.5px; padding: 7px 12px; }
 
+/* 自定义日期范围（时间筛选选「自定义范围…」时展开） */
+.custom-range {
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.custom-range .range-sep { color: var(--muted); font-size: 12px; }
+.custom-range input[type="date"] {
+  font-size: 13px; padding: 6px 8px;
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  color-scheme: dark;
+}
+:root[data-theme="light"] .custom-range input[type="date"] { color-scheme: light; }
+
 /* ---- 转写管理页面 ---- */
 .t-stats { font-size: 13px; color: var(--muted); margin-bottom: 10px; }
 .t-stats b { color: var(--text); font-weight: 600; }

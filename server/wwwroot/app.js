@@ -52,7 +52,9 @@ const state = {
   asrEnabled: true, // 与服务端默认开启一致（实际值以 /api/settings 回填为准）
   q: "",
   contact: "",   // 来源分类筛选（电话号码 / 微信联系人）
-  month: "",     // 月份筛选（2026-11）
+  month: "",     // 时间筛选：""=全部 / "7d"/"30d"/"year"=快捷 / "2026-11"=月份 / "custom"=自定义范围
+  customFrom: "", // 自定义范围起始日期（YYYY-MM-DD，可为空=不限）
+  customTo: "",   // 自定义范围结束日期（YYYY-MM-DD，可为空=不限）
   selectMode: false,      // 多选管理模式
   selected: new Set(),    // 选中的录音 id
   selectedBytes: new Map(), // 选中录音 id → 字节大小（批量栏显示总大小用）
@@ -135,6 +137,29 @@ function fmtDurPair(total, speech) {
 }
 
 // ---- 加载与渲染 ----
+// 把 state.month（含快捷档与自定义范围）解析成 from/to（秒级时间戳）。
+// 返回 null 表示不筛选时间；custom 只用填了的边界（可只填一端）。
+function resolveTimeRange() {
+  const m = state.month;
+  if (!m) return null;
+  const now = Date.now();
+  if (m === "7d") return { from: Math.floor((now - 7 * 86400000) / 1000), to: Math.floor(now / 1000) };
+  if (m === "30d") return { from: Math.floor((now - 30 * 86400000) / 1000), to: Math.floor(now / 1000) };
+  if (m === "year") {
+    const y = new Date().getFullYear();
+    return { from: Math.floor(new Date(y, 0, 1).getTime() / 1000), to: Math.floor(new Date(y + 1, 0, 1).getTime() / 1000) - 1 };
+  }
+  if (m === "custom") {
+    const f = state.customFrom ? Math.floor(new Date(state.customFrom + "T00:00:00").getTime() / 1000) : 0;
+    const t = state.customTo ? Math.floor(new Date(state.customTo + "T23:59:59").getTime() / 1000) : 0;
+    if (!f && !t) return null;
+    return { from: f, to: t };
+  }
+  const [fy, fm] = m.split("-").map(Number);
+  if (!fy) return null;
+  return { from: Math.floor(new Date(fy, fm - 1, 1).getTime() / 1000), to: Math.floor(new Date(fy, fm, 1).getTime() / 1000) - 1 };
+}
+
 async function loadRecordings(reset = true) {
   if (state.loading) return false;
   state.loading = true;
@@ -150,10 +175,10 @@ async function loadRecordings(reset = true) {
       q: state.q,
     });
     if (state.contact) params.set("contact", state.contact);
-    const [fy, fm] = state.month ? state.month.split("-").map(Number) : [0, 0];
-    if (fy) {
-      params.set("from", Math.floor(new Date(fy, fm - 1, 1).getTime() / 1000));
-      params.set("to", Math.floor(new Date(fy, fm, 1).getTime() / 1000) - 1); // 月末 23:59:59
+    const range = resolveTimeRange();
+    if (range) {
+      if (range.from) params.set("from", range.from);
+      if (range.to) params.set("to", range.to);
     }
     // 统计与列表并行请求：总耗时取两者较大值而非相加，列表首屏更快
     const statsPromise = api(`/api/stats`)
@@ -1666,9 +1691,33 @@ async function loadFilters() {
     if (mRes.ok) {
       const d = await mRes.json();
       const sel = $("#monthFilter");
-      sel.innerHTML = '<option value="">全部时间</option>' +
-        (d.items || []).map((m) => `<option value="${m.month}">${m.month}（${m.count}）</option>`).join("");
-      sel.value = state.month;
+      let html = '<option value="">全部时间</option>' +
+        '<optgroup label="快捷">' +
+        '<option value="7d">最近 7 天</option>' +
+        '<option value="30d">最近 30 天</option>' +
+        '<option value="year">今年</option>' +
+        '</optgroup>';
+      // 月份按年份分组（跨年时列表不再是一长条）
+      const byYear = new Map();
+      for (const m of d.items || []) {
+        const y = m.month.slice(0, 4);
+        if (!byYear.has(y)) byYear.set(y, []);
+        byYear.get(y).push(m);
+      }
+      for (const [y, ms] of byYear) {
+        html += `<optgroup label="${y} 年">` + ms.map((m) => {
+          const mo = Number(m.month.slice(5, 7));
+          return `<option value="${m.month}">${mo} 月（${m.count}）</option>`;
+        }).join("") + "</optgroup>";
+      }
+      html += '<option value="custom">自定义范围…</option>';
+      sel.innerHTML = html;
+      sel.value = state.month; // 恢复选中（快捷档/月份/自定义均可命中）
+      if (state.month === "custom") {
+        $("#customRange").hidden = false;
+        $("#dateFrom").value = state.customFrom;
+        $("#dateTo").value = state.customTo;
+      }
     }
   } catch (e) { /* 筛选器加载失败不阻塞列表 */ }
   syncClearBtn();
@@ -1685,14 +1734,32 @@ $("#contactFilter").onchange = (e) => {
 };
 $("#monthFilter").onchange = (e) => {
   state.month = e.target.value;
+  // 选「自定义范围…」展开两个日期框；其余收起
+  $("#customRange").hidden = state.month !== "custom";
+  if (state.month === "custom") $("#dateFrom").focus();
+  syncClearBtn();
+  if (state.month !== "custom") loadRecordings(true); // custom 等日期变更后触发
+};
+// 自定义日期范围：任一端变更即刷新（空端 = 不限该边界）
+function onCustomDateChange() {
+  if (state.month !== "custom") return;
+  state.customFrom = $("#dateFrom").value;
+  state.customTo = $("#dateTo").value;
   syncClearBtn();
   loadRecordings(true);
-};
+}
+$("#dateFrom").onchange = onCustomDateChange;
+$("#dateTo").onchange = onCustomDateChange;
 $("#clearFilters").onclick = () => {
   state.contact = "";
   state.month = "";
+  state.customFrom = "";
+  state.customTo = "";
   $("#contactFilter").value = "";
   $("#monthFilter").value = "";
+  $("#customRange").hidden = true;
+  $("#dateFrom").value = "";
+  $("#dateTo").value = "";
   syncClearBtn();
   loadRecordings(true);
 };
