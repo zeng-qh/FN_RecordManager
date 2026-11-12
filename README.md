@@ -17,14 +17,14 @@
   └─ ADB 无线导入（服务端拉取） ──┘       · 网页端: 内置单页 UI
                                               │ 可选
                                   ASR 边车 (Python + faster-whisper)
-                                  本地推理，文字稿回写；容器是否启动由
-                                  .env 的 COMPOSE_PROFILES 环境变量控制
+                                  本地推理，文字稿回写；compose 默认
+                                  随主服务一起启动
 ```
 
 > **容易混淆的两层「开关」**：转写**功能**默认开启（`VAULT_ASR__ENABLED=true` + 实时模式），
-> 但 ASR **边车容器**是否启动由部署配置决定——compose 部署时由 `.env` 里的
-> `COMPOSE_PROFILES=asr` 控制（复制 `.env.example` 后默认启用）。没启动边车时，
-> 新录音会尝试转写并失败标错：要么启用边车，要么在设置里把转写时机改成 Off。
+> ASR **边车容器**在 compose 里也默认随 `docker compose up -d` 一起启动。不想要转写
+> （如 2GB 小设备省内存）：注释掉 compose 里的 `asr:` 服务块（或 `docker compose up -d voicvault`
+> 只起主服务），并把设置里的转写时机改为 Off。
 
 ## 组件
 
@@ -43,12 +43,10 @@
 ### 方式 A：Docker Compose（推荐）
 
 ```bash
-# 1. 复制 .env.example 为 .env：边车开关（COMPOSE_PROFILES=asr）、
-#    转写模型、内存护栏都在这里调；2GB 设备注释掉 COMPOSE_PROFILES 行
-cp .env.example .env
-# 2. 编辑 docker-compose.yml：把 environment 里的
-#    VAULT_TOKEN=change-me-please 改成你的强令牌
-# 3. 启动（边车随 .env 的 COMPOSE_PROFILES 自动启停，无需命令行参数）
+# 1. 编辑 docker-compose.yml（全部配置都在这个文件里，无需 .env）：
+#    - VAULT_TOKEN=change-me-please 改成你的强令牌
+#    - 不要转写：注释掉 asr: 服务块；4GB 设备：VAULT_ASR__MODEL 改 small
+# 2. 启动（主服务 + 转写边车一起起来）
 docker compose up -d
 # 浏览器打开 http://<nas-ip>:8080/?token=你的令牌 ，免填令牌直接进入
 # （URL 参数会自动保存并从地址栏移除；也可打开不带 token 的地址，在设置里手动填）
@@ -123,15 +121,9 @@ WantedBy=multi-user.target
 | `VAULT_ADBIMPORT__REMOTEDIRS` | （空） | 手机端录音目录，逗号分隔，递归扫描 |
 | `VAULT_ADBIMPORT__ADBPATH` | `adb` | adb 可执行文件路径（容器镜像已内置） |
 
-**compose 层变量**（放 `.env` 文件，模板见 `.env.example`，控制容器编排而非应用行为）：
-
-| 变量 | 默认 | 说明 |
-|------|------|------|
-| `COMPOSE_PROFILES` | （模板设 `asr`） | **转写边车开关**：设 `asr` 则边车随 `docker compose up -d` 启动，注释/删掉该行则不启动。也可临时用 `docker compose --profile asr up -d` |
-| `VAULT_ASR_MODEL` | `tiny` | compose 里注入给主服务的转写模型（2GB 保持 tiny，4GB 推荐 small） |
-| `VAULT_MEMLIMIT` | `896m` | 主服务容器内存护栏 |
-| `ASR_MEMLIMIT` | `1024m` | 边车容器内存护栏（跑 small 必须 2048m） |
-| `ASR_CPUS` | `1.5` | 边车 CPU 上限（4GB 设备可 2.5） |
+> **部署层配置（内存/CPU/边车启停）不在环境变量里**：全部直接写在本目录
+> `docker-compose.yml` 的对应行——`mem_limit`/`cpus`、`VAULT_ASR__MODEL` 等，
+> 项目不使用 `.env` 文件，改一个文件即可完成部署调整。
 
 > **设置持久化**：网页端「设置」保存的 ASR / 保留策略 / ADB 导入 / 每页条数会写入
 > `<DataDir>/settings.json`，重启容器/进程不丢；存在该文件时，其中对应部分
@@ -152,7 +144,7 @@ WantedBy=multi-user.target
 | 服务端 .NET（空闲） | ~50–80 MB | GC 堆硬上限约 600 MB（见下） |
 | 上传 / 播放峰值 | +50–150 MB | 全程流式处理，不把整段录音读进内存 |
 | 系统 + fnOS | ~400–600 MB | 树莓派 OS 基础占用 |
-| ASR 边车（`.env` 可控启停） | 0 | 不启动就不占 |
+| ASR 边车（默认随 compose 启动） | 0 | 注释掉 asr 服务块即不占 |
 | **合计（仅服务端）** | **~600–800 MB** | 2GB 设备仍有约 1.2GB 余量 |
 
 > 一旦开启转写（tiny + int8），边车会再占 ~300–500 MB，**small/medium 模型在 2GB 上基本会 OOM，切勿使用**。
@@ -172,10 +164,10 @@ Whisper 推理吃 CPU，Pi 4B（A72 四核 @1.5GHz，无 AVX）与 x86 服务器
 
 - 声纹分段开销（CAM++ 27MB + F0 分析）在 Pi 上仅增加数秒，可忽略。
 - **与其他应用共存时**：边车已限 3 线程，仍建议 compose 里再留核
-  （`.env` 设 `ASR_CPUS=2.5`），转写期间音乐播放/NAS 响应不受影响。
-- **跑 small 必须放宽边车上限**：`.env` 设 `ASR_MEMLIMIT=2048m`——
+  （`asr` 服务 `cpus` 改 `"2.5"`），转写期间音乐播放/NAS 响应不受影响。
+- **跑 small 必须放宽边车上限**：`asr` 服务 `mem_limit` 改 `2048m`——
   small 推理内存峰值可到 ~1GB+，默认护栏 1024m 会把边车反复 OOM kill、
-  转写任务失败重试。服务端同理可设 `VAULT_MEMLIMIT=1536m`（仅护栏，实际常驻 80–150MB）。
+  转写任务失败重试。主服务同理可把 `mem_limit` 改 `1536m`（仅护栏，实际常驻 80–150MB）。
 - 慢不影响可用性：转写是**后台队列**，白天只备份不转写、夜里闲时消化即可。
 
 ### 已内置的优化（无需额外配置）
@@ -190,20 +182,20 @@ Whisper 推理吃 CPU，Pi 4B（A72 四核 @1.5GHz，无 AVX）与 x86 服务器
 ### 部署要点
 
 - 默认 `mem_limit: 896m`，与 GC 堆上限配合，OOM 风险极低。
-- ASR 边车是否启动由 **`.env` 环境变量控制**（`cp .env.example .env` 后默认启用）：
+- ASR 边车默认**随 `docker compose up -d` 一起启动**，不需要转写时二选一：
 
   ```bash
-  # 启用转写（默认）：.env 里保留 COMPOSE_PROFILES=asr
-  # 关闭转写（2GB 设备省内存）：注释掉该行后 docker compose up -d
-  # 也可临时用命令行：docker compose --profile asr up -d
+  # 方式一：注释掉 docker-compose.yml 里的 asr: 服务块，再 up -d
+  # 方式二：只启动主服务
+  docker compose up -d voicvault
   ```
 
   然后在网页端「设置」里打开 ASR，并选择「实时转写」或「闲时转写」即可。
 - **ASR 边车地址**：compose 同栈部署填 `http://asr:8000`（服务名解析，
   不要填 localhost——主服务容器里的 localhost 是它自己）；边车裸跑在
   宿主机则填 `http://<设备IP>:8000`。填错只影响转写，不影响备份。
-- 树莓派上 `VAULT_ASR_MODEL` 保持 `tiny`（.env 模板已默认）；x86 设备可改 `small`/`medium`
-  （在 `.env` 里改，compose 已支持该变量覆盖）。
+- 树莓派上 `VAULT_ASR__MODEL` 保持 `tiny`（compose 已默认）；x86 设备可改 `small`/`medium`
+  （直接改 docker-compose.yml 里该行）。
 - **小内存设备强烈推荐「闲时转写」**：设置一个空闲时段（如 22→7），
   白天只备份不转写，夜里自动消化——转写时的 CPU/内存峰值不会撞上日常使用，
   也给系统留出充足余量，进一步降低 OOM 风险。
@@ -572,12 +564,11 @@ docker run -d --name voicvault-asr -p 8000:8000 --restart unless-stopped \
    导入 / 每页条数以 settings.json 为准，**此后修改 compose 环境变量不再生效**
    （删除该文件或改用页面设置可恢复）。排查「改了 compose 没效果」先查
    `<DataDir>/settings.json` 是否存在。
-3. **转写模型默认值分两层**：代码默认 `small`；compose 经 `.env`（模板
-   `VAULT_ASR_MODEL=tiny`）针对 2GB 设备覆盖为 `tiny`。x86 / 4GB 设备在
-   `.env` 里改 `VAULT_ASR_MODEL`（compose 已变量化，改文件即可生效）。
-4. **边车内存护栏与 small 模型冲突**：compose 默认 `ASR_MEMLIMIT=1024m`，跑
-   small（推理峰值 ~1GB+）会被反复 OOM kill、转写失败重试——4GB 设备务必设
-   `ASR_MEMLIMIT=2048m`（详见树莓派部署节）。
+3. **转写模型默认值分两层**：代码默认 `small`；compose 针对 2GB 设备显式写为
+   `tiny`。x86 / 4GB 设备直接改 docker-compose.yml 里 `VAULT_ASR__MODEL` 一行。
+4. **边车内存护栏与 small 模型冲突**：compose 默认 `mem_limit: 1024m`，跑
+   small（推理峰值 ~1GB+）会被反复 OOM kill、转写失败重试——4GB 设备务必改成
+   `2048m`（详见树莓派部署节）。
 5. **微信私有格式不支持**：微信 App 内置通话录音（若灰度到）存微信私有目录且
    为专有格式，ADB 拉不到也放不了；`.slk`（silk 编码）语音消息与微信音频缓存
    同样不支持。微信通话录音请用系统录音机「应用通话录音」（标准 m4a/wav）。

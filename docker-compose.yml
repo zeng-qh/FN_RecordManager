@@ -1,20 +1,26 @@
 # VoiceVault 服务端部署（NAS / 树莓派 4B / x86 通用）
+# 全部配置都在本文件里直接改，不需要 .env 文件。
 # 用法：
-#   1. cp .env.example .env —— 转写边车是否启动由其中 COMPOSE_PROFILES 控制
-#      （默认启用；2GB 设备注释掉该行）；模型/内存护栏也可在 .env 覆盖
-#   2. 编辑下方 environment 里的 VAULT_TOKEN（改成你的强令牌）
-#   3. docker compose up -d
-#   4. 浏览器打开 http://<设备ip>:8080 ，设置里填同一个令牌
+#   1. 改下方 environment 里的 VAULT_TOKEN（换成你的强令牌）
+#   2. docker compose up -d
+#   3. 浏览器打开 http://<设备ip>:8080 ，设置里填同一个令牌
+#
+# ┌ 转写边车开关 ─────────────────────────────────────────────
+# │ 默认开启：docker compose up -d 会同时启动主服务 + 转写边车
+# │ 不要转写（2GB 小设备省内存）二选一：
+# │   a) 注释掉下方整个 asr: 服务块，再 docker compose up -d
+# │   b) docker compose up -d voicvault      （只起主服务）
+# │ 并在网页端「设置」把转写时机改为 Off，避免新录音转写失败标错
+# └───────────────────────────────────────────────────────────
 #
 # ┌ 内存档位速查 ─────────────────────────────────────────────
-# │ 2GB 设备：保持默认（tiny 模型），无需任何配置
+# │ 2GB 设备：保持默认（tiny 模型），无需任何改动
 # │ 4GB 设备：直接改下方对应行——
 # │   voicvault:  VAULT_ASR__MODEL 改 small（中文准确率更好）
 # │               mem_limit 改 1536m
 # │   asr:        mem_limit 改 2048m（small 推理峰值 ~1GB+，
 # │               不放宽会被 1024m 护栏反复 OOM kill）
 # │               cpus 改 "2.5"（留核给系统/其他应用）
-# │   （也可不改文件，用 .env 设 ASR_MEMLIMIT/ASR_CPUS/VAULT_ASR_MODEL 覆盖）
 # └───────────────────────────────────────────────────────────
 services:
   voicvault:
@@ -38,17 +44,16 @@ services:
       # 边车裸跑在宿主机时改成 http://<设备IP>:8000
       - VAULT_ASR__ENDPOINT=http://asr:8000
       # 转写模型：2GB 设备用 tiny；4GB 推荐改 small（中文准确率明显更好）
-      # 可在 .env 设 VAULT_ASR_MODEL 覆盖（默认 tiny）
-      - VAULT_ASR__MODEL=${VAULT_ASR_MODEL:-tiny}
+      - VAULT_ASR__MODEL=tiny
       # 默认开启实时转写（上传即转）。改 false 则只备份不自动转写
       # 转写时机：Off（关闭，仅手动）/ Realtime（上传即转）/ Idle（闲时转写）
       - VAULT_ASR__ENABLED=true
       - VAULT_ASR__MODE=Realtime
       - VAULT_ASR__IDLESTARTHOUR=22
       - VAULT_ASR__IDLEENDHOUR=7
-    # 内存硬上限（防失控护栏，非实际占用）：默认 2GB 小设备保守值。
-    # 4GB 设备在 .env 设 VAULT_MEMLIMIT=1536m。
-    mem_limit: ${VAULT_MEMLIMIT:-896m}
+    # 内存硬上限（防失控护栏，非实际占用）：默认 2GB 小设备保守值；
+    # 4GB 设备改 1536m
+    mem_limit: 896m
     volumes:
       - voicvault-data:/data
     restart: unless-stopped
@@ -59,12 +64,10 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # 本地语音转写边车：是否随 `docker compose up -d` 启动由 .env 里的
-  # COMPOSE_PROFILES 控制（cp .env.example .env 后默认启用；注释掉该行即关闭）。
-  # 也可临时用命令行控制：docker compose --profile asr up -d
+  # 本地语音转写边车（默认随 docker compose up -d 一起启动）。
+  # 不需要转写（省内存）：注释掉本块，或 docker compose up -d voicvault。
   # 注意：2GB 树莓派必须保持 tiny；4GB 可改 small 并放宽下方内存/CPU。
   asr:
-    profiles: ["asr"]
     image: ghcr.io/zeng-qh/voicvault-asr:latest
     build: ./asr
     ports:
@@ -78,10 +81,10 @@ services:
       - MKL_NUM_THREADS=3
     volumes:
       - ./asr-models:/root/.cache  # 缓存 Whisper 模型
-    # 2GB 默认 1024m + 1.5 核；4GB 跑 small 时在 .env 设
-    # ASR_MEMLIMIT=2048m、ASR_CPUS=2.5（small 推理峰值 ~1GB+，不放宽会被 OOM kill）
-    mem_limit: ${ASR_MEMLIMIT:-1024m}
-    cpus: "${ASR_CPUS:-1.5}"
+    # 2GB 默认 1024m + 1.5 核；4GB 跑 small 时改成 2048m + "2.5"
+    # （small 推理峰值 ~1GB+，不放宽会被 OOM kill）
+    mem_limit: 1024m
+    cpus: "1.5"
     restart: unless-stopped
     logging:
       driver: json-file
