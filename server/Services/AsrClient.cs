@@ -61,7 +61,7 @@ public class AsrClient(HttpClient http, VaultConfig cfg)
     private record HealthInfo(bool Diarize);
 
     /// <summary>声纹就绪探测缓存（静态：跨实例共享），5 分钟内不重复探测。</summary>
-    private static (bool Ready, DateTimeOffset At) _diarizeCache;
+    private static (bool Reachable, bool Diarize, DateTimeOffset At) _sidecarCache;
 
     /// <summary>Endpoint 未配置时回退到默认地址，避免拼出非法 URL 静默失败。</summary>
     private string BaseEndpoint =>
@@ -91,27 +91,41 @@ public class AsrClient(HttpClient http, VaultConfig cfg)
     }
 
     /// <summary>
-    /// 探测边车声纹模型是否就绪（/health 的 diarize 字段）。
-    /// 结果缓存 5 分钟：设置页每次打开都会读，避免高频探测；
-    /// 探测失败沿用上次结果（边车临时不可达时 UI 不闪烁）。
+    /// 探测边车状态：是否可达 + 声纹模型是否就绪（一次 /health 请求）。
+    /// 设置页据此区分三种情况——边车没启动 / 模型缺失 / 一切就绪，
+    /// 避免把「边车不可达」误报成「未安装声纹模型」。
+    /// 缓存：就绪结果 5 分钟（避免高频探测）；不可达只缓存 30 秒
+    /// （用户拉起边车后刷新设置页能很快看到恢复）。
     /// </summary>
-    public async Task<bool> DiarizeReadyAsync(CancellationToken ct = default)
+    public async Task<(bool Reachable, bool Diarize)> ProbeAsync(CancellationToken ct = default)
     {
-        var (ready, at) = _diarizeCache;
-        if (DateTimeOffset.UtcNow - at < TimeSpan.FromMinutes(5))
-            return ready;
+        var (reachable, diarize, at) = _sidecarCache;
+        var ttl = reachable ? TimeSpan.FromMinutes(5) : TimeSpan.FromSeconds(30);
+        if (DateTimeOffset.UtcNow - at < ttl)
+            return (reachable, diarize);
         try
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(2));
             var d = await http.GetFromJsonAsync<HealthInfo>(BaseEndpoint + "/health", JsonOpts, cts.Token);
-            _diarizeCache = (d?.Diarize == true, DateTimeOffset.UtcNow);
-            return _diarizeCache.Ready;
+            _sidecarCache = (true, d?.Diarize == true, DateTimeOffset.UtcNow);
+            return (true, d?.Diarize == true);
         }
         catch
         {
-            return ready; // 边车不在线：沿用缓存值
+            _sidecarCache = (false, false, DateTimeOffset.UtcNow);
+            return (false, false);
         }
+    }
+
+    /// <summary>
+    /// 探测边车声纹模型是否就绪（/health 的 diarize 字段）。
+    /// 结果缓存 5 分钟：设置页每次打开都会读，避免高频探测。
+    /// </summary>
+    public async Task<bool> DiarizeReadyAsync(CancellationToken ct = default)
+    {
+        var (_, diarize) = await ProbeAsync(ct);
+        return diarize;
     }
 
     /// <summary>

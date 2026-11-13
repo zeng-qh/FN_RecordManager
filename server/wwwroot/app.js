@@ -1393,12 +1393,23 @@ async function refreshSettingsForm() {
     $("#cfgAsrEndpoint").value = d.asr?.endpoint || "";
     $("#cfgAsrModel").value = d.asr?.model || "small";
     $("#cfgAsrDiarize").checked = !!(d.asr && d.asr.speakerDiarization);
-    // 说话人分段依赖边车声纹模型：未就绪时提示勾选无效，避免「勾了没效果」的困惑
+    // 说话人分段依赖边车声纹模型：区分「边车不可达 / 模型缺失 / 就绪」三种状态，
+    // 避免把边车没启动误报成「未安装声纹模型」
     const dHint = $("#cfgAsrDiarizeHint");
     if (dHint) {
-      const ok = !!d.diarizeReady;
-      dHint.textContent = ok ? "✓ 声纹模型已就绪" : "⚠ 边车未安装声纹模型（勾选无效）";
-      dHint.className = ok ? "diarize-ok" : "diarize-warn";
+      if (d.asr && d.asr.enabled === false) {
+        dHint.textContent = ""; // 未启用转写：不提示
+        dHint.className = "diarize-hint";
+      } else if (!d.asrReachable) {
+        dHint.textContent = "⚠ 边车不可达（检查边车是否启动、地址是否正确）";
+        dHint.className = "diarize-warn";
+      } else if (!d.diarizeReady) {
+        dHint.textContent = "⚠ 边车未安装声纹模型（勾选无效，转写不受影响）";
+        dHint.className = "diarize-warn";
+      } else {
+        dHint.textContent = "✓ 声纹模型已就绪";
+        dHint.className = "diarize-ok";
+      }
     }
     $("#cfgRetDays").value = d.retention?.days ?? 0;
     const gb = d.retention?.maxBytes ?? 0;

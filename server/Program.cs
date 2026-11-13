@@ -9,7 +9,7 @@ using VoiceVault.Server.Models;
 using VoiceVault.Server.Services;
 
 // 服务端版本号（/api/health 返回，设置界面展示；发版时更新这里）
-const string AppVersion = "1.2.1";
+const string AppVersion = "1.2.2";
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -812,17 +812,23 @@ api.MapDelete("/speakers/{id:long}", (long id) =>
         : Results.NotFound(new { error = "not found" }));
 
 // 设置（ASR / 转写时机 / 保留策略，持久化到 settings.json）
-// diarizeReady：边车声纹模型是否就绪（探测缓存 5 分钟）——决定「说话人分段」勾选是否生效
-api.MapGet("/settings", async () => Results.Ok(new
+// asrReachable / diarizeReady：边车是否可达、声纹模型是否就绪（探测缓存）——
+// 设置页据此区分「边车没启动」与「未安装声纹模型」两种提示
+api.MapGet("/settings", async () =>
 {
-    tokenHint = cfg.Token.Length > 4 ? cfg.Token[..4] + "****" : "****",
-    asr = cfg.Asr,
-    retention = cfg.Retention,
-    adbImport = cfg.AdbImport,
-    pageSize = cfg.PageSize,
-    transcribeSpeed = Math.Round(cfg.TranscribeSpeed, 2),
-    diarizeReady = await asr.DiarizeReadyAsync()
-}));
+    var sidecar = await asr.ProbeAsync();
+    return Results.Ok(new
+    {
+        tokenHint = cfg.Token.Length > 4 ? cfg.Token[..4] + "****" : "****",
+        asr = cfg.Asr,
+        retention = cfg.Retention,
+        adbImport = cfg.AdbImport,
+        pageSize = cfg.PageSize,
+        transcribeSpeed = Math.Round(cfg.TranscribeSpeed, 2),
+        asrReachable = sidecar.Reachable,
+        diarizeReady = sidecar.Diarize
+    });
+});
 
 api.MapPut("/settings", (StoredSettings incoming) =>
 {
