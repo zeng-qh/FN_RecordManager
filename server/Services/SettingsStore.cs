@@ -17,6 +17,13 @@ public class StoredSettings
 
     /// <summary>手机无线导入（ADB）配置。可空以兼容旧版 settings.json（缺省保留部署默认值）。</summary>
     public AdbImportConfig? AdbImport { get; set; }
+
+    /// <summary>
+    /// 访问令牌（Web 设置页"修改服务端令牌"后持久化于此）。
+    /// null/空白 = 未改过，继续用部署默认值（环境变量 VAULT_TOKEN / appsettings）。
+    /// 一旦通过网页修改，settings.json 里的值优先于环境变量。
+    /// </summary>
+    public string? Token { get; set; }
 }
 
 /// <summary>

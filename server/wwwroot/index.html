@@ -162,6 +162,23 @@
     <audio id="audio" controls preload="metadata"></audio>
   </footer>
 
+  <!-- 登录遮罩：令牌缺失或失效时自动弹出，输入有效令牌后记忆并进入 -->
+  <div id="loginModal" class="modal" hidden>
+    <div class="modal-card login-card">
+      <h2>连接到 VoiceVault</h2>
+      <div id="loginMsg" class="login-msg" hidden></div>
+      <label>服务器地址
+        <input id="loginServer" type="text" placeholder="http://192.168.1.10:8080" />
+      </label>
+      <label>访问令牌 (Token)
+        <input id="loginToken" type="password" placeholder="服务端 VAULT_TOKEN 或设置页修改后的令牌" />
+      </label>
+      <div class="modal-actions">
+        <button id="loginSubmit" class="primary">连接</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 设置弹窗 -->
   <div id="settingsModal" class="modal" hidden>
     <div class="modal-card settings-card">
@@ -182,8 +199,13 @@
             <input id="cfgServer" type="text" placeholder="http://192.168.1.10:8080" />
           </label>
           <label>访问令牌 (Token)
-            <input id="cfgToken" type="password" placeholder="与服务端 VAULT_TOKEN 一致" />
+            <input id="cfgToken" type="password" placeholder="与服务端令牌一致（改过以服务端为准）" />
           </label>
+          <label>修改服务端令牌
+            <input id="cfgNewToken" type="password" placeholder="留空 = 不修改；改后所有旧令牌连接失效" />
+            <span class="idle-hint">新令牌立即生效并持久化（优先于 VAULT_TOKEN 环境变量），本浏览器自动切换到新令牌，其他设备需重新登录。忘记令牌时需到服务器上编辑 DataDir/settings.json 重置。</span>
+          </label>
+          <label class="row"><button id="btnChangeToken" type="button">修改令牌</button></label>
         </div>
         <div class="settings-col">
           <h3>手机导入 (ADB)</h3>

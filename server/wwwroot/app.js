@@ -81,13 +81,49 @@ async function api(path, opts = {}) {
     headers: { ...authHeader(), ...(opts.headers || {}) },
   });
   if (res.status === 401) {
-    // 仅当设置弹窗未打开时才引导打开：
-    // 否则 saveSettings 关闭弹窗后，refreshSettingsForm 的异步 401 回调
-    // 会把弹窗重新打开，表现为「点保存后设置弹窗不关闭」
-    if ($("#settingsModal").hidden) openSettings("令牌无效或为空，请重新设置");
+    // 令牌缺失/失效：弹出登录遮罩重新输入（不再引导进设置弹窗，
+    // 避免出现「点保存后弹窗不关闭」的旧问题；遮罩可叠加在设置弹窗之上）
+    showLogin("令牌无效或已过期，请重新连接");
     throw new Error("unauthorized");
   }
   return res;
+}
+
+// ---- 登录遮罩 ----
+function showLogin(msg) {
+  const m = $("#loginModal");
+  if (!m.hidden) return; // 已在显示（如请求并发触发多次 401），不重复弹
+  $("#loginServer").value = state.server || location.origin;
+  $("#loginToken").value = "";
+  const msgEl = $("#loginMsg");
+  if (msg) { msgEl.textContent = msg; msgEl.hidden = false; } else msgEl.hidden = true;
+  m.hidden = false;
+  setTimeout(() => $("#loginToken").focus(), 50);
+}
+
+async function tryLogin() {
+  const server = ($("#loginServer").value.trim() || location.origin).replace(/\/$/, "");
+  const token = $("#loginToken").value.trim();
+  const msgEl = $("#loginMsg");
+  const fail = (t) => { msgEl.textContent = t; msgEl.hidden = false; };
+  if (!token) return fail("请输入访问令牌");
+  try {
+    // 用 /api/settings 试连（需要鉴权；/api/health 不校验令牌，验不了）
+    // token 同时放 query，兜底反代剥离 Authorization 头
+    const u = new URL(server + "/api/settings");
+    u.searchParams.set("token", token);
+    const res = await fetch(u, { headers: { Authorization: "Bearer " + token } });
+    if (res.status === 401) return fail("令牌无效，请核对后重试");
+    if (!res.ok) return fail("连接失败：HTTP " + res.status);
+    // 验证通过：记住服务器地址与令牌，整体刷新进入
+    state.server = server;
+    state.token = token;
+    localStorage.setItem(LS_SERVER, server);
+    localStorage.setItem(LS_TOKEN, token);
+    location.reload();
+  } catch (e) {
+    fail("无法连接服务器：" + e.message);
+  }
 }
 
 function fmtSize(bytes) {
@@ -1550,6 +1586,39 @@ $("#refresh").onclick = () => {
 };
 $("#settingsBtn").onclick = () => openSettings();
 $("#saveSettings").onclick = saveSettings;
+
+// 登录遮罩：按钮提交 + 令牌输入框回车提交
+$("#loginSubmit").onclick = tryLogin;
+$("#loginToken").addEventListener("keydown", (ev) => { if (ev.key === "Enter") tryLogin(); });
+
+// 修改服务端令牌：POST /api/settings/token，新令牌立即生效并持久化（settings.json）
+$("#btnChangeToken").onclick = async () => {
+  const t = $("#cfgNewToken").value.trim();
+  if (!t) { alert("请先输入新令牌（留空表示不修改）"); return; }
+  if (!confirm("确认修改服务端令牌？\n修改后立即生效：本浏览器自动切换，其他设备需用新令牌重新登录。")) return;
+  try {
+    const res = await api("/api/settings/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: t }),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      alert("修改失败：" + (d.error || "HTTP " + res.status));
+      return;
+    }
+    state.token = t;
+    localStorage.setItem(LS_TOKEN, t);
+    $("#cfgToken").value = t; // 连接令牌同步切换，保持本浏览器可用
+    $("#cfgNewToken").value = "";
+    alert("服务端令牌已修改并持久化，本浏览器已切换到新令牌。");
+    refreshSettingsForm(); // 刷新 tokenHint 显示
+  } catch (err) {
+    if (err.message !== "unauthorized") alert("修改失败：" + err.message);
+    // 401 已由 api() 弹出登录遮罩，这里不再重复提示
+  }
+};
+
 initTheme(); // 明暗主题：绑定设置下拉 + 跟随系统监听
 
 // 顶栏版本号：展示服务端部署版本（health 为匿名接口，走裸 fetch 静默失败，

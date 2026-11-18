@@ -9,7 +9,7 @@ using VoiceVault.Server.Models;
 using VoiceVault.Server.Services;
 
 // 服务端版本号（/api/health 返回，设置界面展示；发版时更新这里）
-const string AppVersion = "1.2.2";
+const string AppVersion = "1.3.0";
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -29,6 +29,7 @@ if (settingsStore.Load() is { } saved)
     if (saved.PageSize > 0) cfg.PageSize = saved.PageSize;
     if (saved.TranscribeSpeed > 0) cfg.TranscribeSpeed = saved.TranscribeSpeed; // 转写速度因子（估算耗时用）
     if (saved.AdbImport is not null) cfg.AdbImport = saved.AdbImport; // 手机无线导入（ADB）
+    if (!string.IsNullOrWhiteSpace(saved.Token)) cfg.Token = saved.Token.Trim(); // 网页端改过的令牌优先于环境变量
 }
 
 builder.WebHost.UseUrls($"http://{cfg.Bind}:{cfg.Port}");
@@ -861,7 +862,8 @@ api.MapPut("/settings", (StoredSettings incoming) =>
         settingsStore.Save(new StoredSettings
         {
             Asr = cfg.Asr, Retention = cfg.Retention, AdbImport = cfg.AdbImport,
-            PageSize = cfg.PageSize, TranscribeSpeed = cfg.TranscribeSpeed
+            PageSize = cfg.PageSize, TranscribeSpeed = cfg.TranscribeSpeed,
+            Token = cfg.Token // 带上当前令牌，避免本次保存覆盖掉"修改服务端令牌"的持久化
         });
     }
     catch (Exception ex) { logger.LogWarning(ex, "Failed to persist settings"); }
@@ -882,6 +884,35 @@ api.MapPut("/settings", (StoredSettings incoming) =>
 
 /// <summary>将小时裁剪到 [0,23] 合法范围。</summary>
 static int ClampHour(int h) => Math.Clamp(h, 0, 23);
+
+// 修改服务端访问令牌（Web 设置页"修改服务端令牌"）。
+// 鉴权中间件已保证调用者持有当前有效令牌；新令牌立即生效并持久化到
+// settings.json（优先于 VAULT_TOKEN 环境变量），重启容器不丢。
+// 注意：改完后所有旧令牌的浏览器/客户端都会 401，需用新令牌重新连接。
+api.MapPost("/settings/token", (TokenChangeRequest req) =>
+{
+    var t = req.Token?.Trim() ?? "";
+    if (t.Length < 4)
+        return Results.BadRequest(new { error = "令牌至少 4 个字符" });
+    if (t == auth.CurrentToken)
+        return Results.BadRequest(new { error = "新令牌与当前令牌相同" });
+
+    auth.Update(t);
+    cfg.Token = t;
+    try
+    {
+        settingsStore.Save(new StoredSettings
+        {
+            Asr = cfg.Asr, Retention = cfg.Retention, AdbImport = cfg.AdbImport,
+            PageSize = cfg.PageSize, TranscribeSpeed = cfg.TranscribeSpeed, Token = t
+        });
+    }
+    catch (Exception ex) { logger.LogWarning(ex, "Failed to persist token"); }
+
+    logger.LogInformation("Access token changed via web settings, hint={Hint}",
+        t.Length > 4 ? t[..4] + "****" : "****");
+    return Results.Ok(new { tokenHint = t.Length > 4 ? t[..4] + "****" : "****" });
+});
 
 /// <summary>
 /// 上传收尾公共逻辑（单请求 multipart 与分片拼接共用）：
@@ -1055,3 +1086,6 @@ internal static class ShaProbe
         return Convert.ToHexString(alg.ComputeHash(fs)).ToLowerInvariant();
     }
 }
+
+/// <summary>修改令牌请求体（POST /api/settings/token）。</summary>
+record TokenChangeRequest(string? Token);

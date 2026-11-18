@@ -131,6 +131,11 @@ WantedBy=multi-user.target
 > （排查时先看 `<DataDir>/settings.json` 是否存在，删掉该文件或改用页面设置即可）。
 > 旧版仅含 ASR 字段的 settings.json 自动兼容。
 
+> **令牌改版（v1.3.0）**：令牌不再只能靠环境变量——
+> - 打开页面若令牌缺失/失效，自动弹出「连接到 VoiceVault」登录框，填服务器地址 + 令牌即可，无需再拼 `?token=` 链接（旧方式仍然有效）；
+> - 设置页新增「修改服务端令牌」：新令牌立即生效并持久化到 `<DataDir>/settings.json`（**此后优先于 `VAULT_TOKEN` 环境变量**），本浏览器自动切换，其他设备需用新令牌重新登录；
+> - 忘记令牌时到服务器上编辑 `<DataDir>/settings.json` 删除 `"token"` 行（或改成想要的值）后重启即可。
+
 ---
 
 ## 树莓派 4B（2GB 内存）优化部署
@@ -545,6 +550,7 @@ docker run -d --name voicvault-asr -p 8000:8000 --restart unless-stopped \
 | PATCH | `/api/speakers/{id}` | 声纹改名（同名即合并档案） |
 | DELETE | `/api/speakers/{id}` | 删除声纹档案（历史记录恢复匿名标签） |
 | GET/PUT | `/api/settings` | 读取 / 修改设置（asr / retention / adbImport / pageSize；PUT 落盘持久化并立即生效） |
+| POST | `/api/settings/token` | 修改服务端访问令牌 `{ "token": "新令牌" }`，立即生效并持久化（≥4 字符；改后旧令牌全部失效） |
 
 ## 隐私
 
@@ -563,7 +569,8 @@ docker run -d --name voicvault-asr -p 8000:8000 --restart unless-stopped \
 2. **settings.json 优先级副作用**：网页端保存过设置后，ASR / 保留策略 / ADB
    导入 / 每页条数以 settings.json 为准，**此后修改 compose 环境变量不再生效**
    （删除该文件或改用页面设置可恢复）。排查「改了 compose 没效果」先查
-   `<DataDir>/settings.json` 是否存在。
+   `<DataDir>/settings.json` 是否存在。**令牌同理**：设置页改过令牌后
+   `VAULT_TOKEN` 环境变量失效，以 settings.json 的 `token` 为准。
 3. **转写模型默认值分两层**：代码默认 `small`；compose 针对 2GB 设备显式写为
    `tiny`。x86 / 4GB 设备直接改 docker-compose.yml 里 `VAULT_ASR__MODEL` 一行。
 4. **边车内存护栏与 small 模型冲突**：compose 默认 `mem_limit: 1024m`，跑
