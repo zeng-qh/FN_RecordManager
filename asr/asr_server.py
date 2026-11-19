@@ -5,8 +5,13 @@ VoiceVault 本地语音转写边车（ASR）
 由 VoiceVault 服务端在「启用 ASR」时通过 HTTP 调用，平时可不启动。
 
 端点：
+  GET  /                       状态页：运行成功显示默认状态页；
+                               依赖/组件异常显示失败页 + 具体原因 + 修复提示
   GET  /health
-      → { "status": "ok", "diarize": true|false }  diarize=声纹模型是否就绪
+      → { "status": "ok"|"error", "diarize": true|false, "ok": bool,
+          "error": "首个致命原因|null", "device": "cpu", "compute": "int8",
+          "uptime_sec": 1234 }  diarize=声纹模型是否就绪；HTTP 恒为 200，
+                               status/ok 字段区分组件是否自检通过
   POST /transcribe            同步转写（兼容旧客户端，长连接等完整结果）
       multipart: file=音频, model=模型规模, diarize=bool
       → { "text": "...", "segments": [{start,end,text,speaker?}],
@@ -48,17 +53,26 @@ VoiceVault 本地语音转写边车（ASR）
   docker build -t voicvault-asr . && docker run -p 8000:8000 -v $PWD/models:/root/.cache voicvault-asr
 """
 import argparse
-import av  # faster-whisper 依赖 PyAV；此处用于读取音频容器真实时长/解码声纹样本
 import os
 import tempfile
 import threading
 import time
 import traceback
 
+# PyAV 属关键依赖：导入失败时转写/声纹解码全不可用。不再让进程直接崩溃
+# （否则守护脚本只会无意义地重启循环、永远看不到原因），而是记录失败原因，
+# 服务照常启动，由 GET / 状态页与 /health 明确展示失败原因。
+try:
+    import av  # faster-whisper 依赖 PyAV；此处用于读取音频容器真实时长/解码声纹样本
+    _AV_IMPORT_ERROR = ""
+except Exception as _av_err:  # noqa: F401
+    av = None  # type: ignore[assignment]
+    _AV_IMPORT_ERROR = f"{type(_av_err).__name__}: {_av_err}"
+
 import uvicorn
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 app = FastAPI(title="VoiceVault ASR")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -69,6 +83,25 @@ _s2t_converter = None
 _jobs: dict = {}
 _jobs_lock = threading.Lock()
 JOB_TTL_SEC = 600  # 完成后保留 10 分钟供补拉，过期由清理线程回收
+
+# ---- 启动自检（GET / 状态页与 /health 的数据源）----
+# faster-whisper 在后台线程预检（import 需数秒，不阻塞 uvicorn 起监听）；
+# ok=None 表示仍在检查中，True/False 为结果。
+_START_TIME = time.time()
+_LISTEN_PORT = 8000  # __main__ 解析实际监听端口，供状态页展示
+_fw_check = {"ok": None, "error": ""}
+
+
+def _preflight_faster_whisper():
+    try:
+        import faster_whisper  # noqa: F401
+
+        _fw_check.update(ok=True, error="")
+    except Exception as e:
+        _fw_check.update(ok=False, error=f"{type(e).__name__}: {e}")
+
+
+threading.Thread(target=_preflight_faster_whisper, daemon=True).start()
 
 
 def _janitor():
@@ -201,6 +234,8 @@ def _decode_16k_mono_int16(path: str):
     """解码音频为 16k 单声道 int16 一维数组（声纹分段用）。"""
     import numpy as np
 
+    if av is None:
+        raise RuntimeError(f"PyAV 不可用，无法解码音频（{_AV_IMPORT_ERROR}）")
     container = av.open(path)
     resampler = av.AudioResampler(format="s16", layout="mono", rate=16000)
     chunks = []
@@ -438,7 +473,188 @@ def _assign_speakers(path: str, segments: list, extractor) -> list:
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "diarize": _diarize_ready()}
+    err = _critical_error()
+    return {
+        "status": "ok" if not err else "error",
+        "diarize": _diarize_ready(),
+        "ok": not err,
+        "error": err or None,
+        "device": os.environ.get("ASR_DEVICE", "cpu"),
+        "compute": os.environ.get("ASR_COMPUTE", "int8"),
+        "uptime_sec": int(time.time() - _START_TIME),
+    }
+
+
+# ---- 状态页（GET /）----
+def _critical_error() -> str:
+    """致命组件（缺了转写完全不可用）的首个失败原因；空串 = 自检通过。"""
+    if _AV_IMPORT_ERROR:
+        return f"PyAV（av）导入失败 — {_AV_IMPORT_ERROR}"
+    if _fw_check["ok"] is False:
+        return f"faster-whisper 导入失败 — {_fw_check['error']}"
+    return ""
+
+
+def _diarize_detail() -> dict:
+    """声纹组件状态明细：就绪与否 + 原因/路径。"""
+    try:
+        import sherpa_onnx  # noqa: F401
+
+        sherpa_ok, sherpa_err = True, ""
+    except Exception as e:
+        sherpa_ok, sherpa_err = False, f"{type(e).__name__}: {e}"
+    path = _diarize_model_path()
+    if not sherpa_ok:
+        return {"ok": False, "detail": f"sherpa-onnx 未安装（{sherpa_err}）— 不标注说话人"}
+    if not path:
+        return {"ok": False, "detail": "模型文件缺失（候选路径："
+                + "、".join(p for p in _DIARIZE_MODEL_CANDIDATES if p) + "）— 不标注说话人"}
+    return {"ok": True, "detail": path}
+
+
+def _fix_hints() -> list:
+    """按失败组件给出修复建议。"""
+    hints = []
+    if _AV_IMPORT_ERROR:
+        hints.append("安装 PyAV：pip install av（或 pip install -r requirements.txt）")
+    if _fw_check["ok"] is False:
+        hints.append("安装 faster-whisper：pip install -r requirements.txt；"
+                     "离线部署可用 pip download 预下载后拷入")
+    d = _diarize_detail()
+    if not d["ok"]:
+        hints.append("声纹为可选组件，缺失仅降级为「不标注说话人」："
+                     "pip install sherpa-onnx，并把 campplus.onnx 放到 models/ 目录"
+                     "（或设 ASR_DIARIZE_MODEL 指向文件）")
+    return hints
+
+
+def _page_html() -> str:
+    import html as _h
+
+    err = _critical_error()
+    ok = not err
+    d = _diarize_detail()
+    uptime = int(time.time() - _START_TIME)
+    h, m, s = uptime // 3600, uptime % 3600 // 60, uptime % 60
+    uptime_txt = f"{h}小时{m}分{s}秒" if h else (f"{m}分{s}秒" if m else f"{s}秒")
+
+    fw_ver = ""
+    if _fw_check["ok"]:
+        try:
+            from importlib.metadata import version as _v
+
+            fw_ver = f"v{_v('faster-whisper')}"
+        except Exception:
+            fw_ver = ""
+    fw_detail = ("已就绪" + (f"（{fw_ver}）" if fw_ver else "")) if _fw_check["ok"] \
+        else ("检查中…" if _fw_check["ok"] is None else f"导入失败 — {_fw_check['error']}")
+
+    loaded = "、".join(sorted(_model_cache)) or "暂无（首次转写时按需加载）"
+    with _jobs_lock:
+        active = sum(1 for j in _jobs.values() if j.get("status") in ("queued", "running"))
+    device = os.environ.get("ASR_DEVICE", "cpu")
+    compute = os.environ.get("ASR_COMPUTE", "int8")
+    threads = os.environ.get("CT2_NUM_THREADS", "3")
+
+    def row(name, okv, detail, critical=False):
+        dot = "ok" if okv else ("warn" if not critical else "bad")
+        return (f'<tr><td>{_h.escape(name)}</td>'
+                f'<td><span class="dot {dot}"></span>'
+                f'{_h.escape("正常" if okv else ("降级" if not critical else "失败"))}</td>'
+                f'<td class="d">{_h.escape(detail)}</td></tr>')
+
+    rows = [
+        row("PyAV（音频解码）", not _AV_IMPORT_ERROR,
+            "已就绪" if not _AV_IMPORT_ERROR else _AV_IMPORT_ERROR, critical=True),
+        row("faster-whisper（转写引擎）", bool(_fw_check["ok"]),
+            fw_detail, critical=_fw_check["ok"] is False),
+        row("声纹模型（CAM++，可选）", d["ok"], d["detail"], critical=False),
+    ]
+
+    if ok:
+        status_badge = '<span class="badge ok">运行正常</span>'
+        banner = ""
+        extra_rows = f"""
+        <tr><td>运行时长</td><td>—</td><td class="d">{uptime_txt}</td></tr>
+        <tr><td>推理设备</td><td>—</td><td class="d">{_h.escape(device)} / {_h.escape(compute)} / {_h.escape(threads)} 线程</td></tr>
+        <tr><td>已加载 Whisper 模型</td><td>—</td><td class="d">{_h.escape(loaded)}</td></tr>
+        <tr><td>进行中任务</td><td>—</td><td class="d">{active} 个</td></tr>"""
+        if not d["ok"]:
+            banner = ('<div class="banner warn">声纹组件未就绪：转写可用，'
+                      '但无法标注说话人（详见下方组件表）</div>')
+    else:
+        status_badge = '<span class="badge bad">服务异常</span>'
+        hints = "".join(f"<li>{_h.escape(t)}</li>" for t in _fix_hints())
+        banner = (f'<div class="banner bad"><b>失败原因</b><br>{_h.escape(err)}</div>'
+                  + (f'<div class="banner fix"><b>修复建议</b><ul>{hints}</ul></div>' if hints else ""))
+        extra_rows = f"""
+        <tr><td>运行时长</td><td>—</td><td class="d">{uptime_txt}</td></tr>
+        <tr><td>监听端口</td><td>—</td><td class="d">{_LISTEN_PORT}（HTTP 正常，仅组件异常）</td></tr>"""
+
+    return f"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VoiceVault 转写边车</title>
+<style>
+:root {{ color-scheme: dark; }}
+* {{ box-sizing: border-box; }}
+body {{ margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+  background:#0d1117; color:#e6edf3; font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif; }}
+.card {{ width:720px; max-width:94vw; background:#161b22; border:1px solid #30363d;
+  border-radius:16px; padding:28px 30px; margin:24px 0; }}
+h1 {{ font-size:18px; margin:0 0 4px; display:flex; align-items:center; gap:10px; }}
+.sub {{ color:#8b949e; font-size:12px; margin-bottom:18px; }}
+.badge {{ font-size:12px; padding:3px 12px; border-radius:99px; font-weight:600; }}
+.badge.ok {{ background:#23863633; color:#3fb950; border:1px solid #3fb95055; }}
+.badge.bad {{ background:#da363333; color:#f85149; border:1px solid #f8514955; }}
+.banner {{ border-radius:10px; padding:10px 14px; font-size:13px; margin:10px 0 14px; }}
+.banner.warn {{ background:#bb800922; border:1px solid #d2992255; color:#d29922; }}
+.banner.bad {{ background:#da363322; border:1px solid #f8514955; color:#f85149; }}
+.banner.fix {{ background:#1f6feb18; border:1px solid #58a6ff44; color:#a5d6ff; }}
+.banner.fix ul {{ margin:6px 0 0; padding-left:18px; }}
+table {{ width:100%; border-collapse:collapse; }}
+td, th {{ padding:9px 8px; border-bottom:1px solid #21262d; text-align:left; vertical-align:top; }}
+th {{ color:#8b949e; font-weight:500; font-size:12px; }}
+td:first-child {{ width:30%; color:#8b949e; }}
+td.d {{ color:#c9d1d9; word-break:break-all; }}
+.dot {{ display:inline-block; width:8px; height:8px; border-radius:99px; margin-right:6px; }}
+.dot.ok {{ background:#3fb950; }} .dot.warn {{ background:#d29922; }} .dot.bad {{ background:#f85149; }}
+.epi {{ margin-top:16px; font-size:12px; color:#8b949e; }}
+code {{ background:#21262d; padding:1px 6px; border-radius:5px; color:#a5d6ff; }}
+#live {{ margin-top:14px; font-size:12px; color:#8b949e; }}
+</style></head><body>
+<div class="card">
+  <h1>🎙️ VoiceVault 转写边车 {status_badge}</h1>
+  <div class="sub">本地语音转写服务（faster-whisper + 声纹分段），数据不出设备</div>
+  {banner}
+  <table>
+    <tr><th>组件</th><th>状态</th><th>说明</th></tr>
+    {''.join(rows)}
+    {extra_rows}
+  </table>
+  <div class="epi">端点：<code>GET /health</code> · <code>POST /transcribe</code> ·
+  <code>POST /transcribe-async</code> · <code>GET /transcribe-status/{{id}}</code> ·
+  <code>POST /speaker-embedding</code></div>
+  <div id="live">每 20 秒自动刷新状态</div>
+</div>
+<script>
+setInterval(async () => {{
+  try {{
+    const r = await fetch('/health'); const d = await r.json();
+    if (!d.ok) location.reload();
+    else document.getElementById('live').textContent =
+      '运行正常 · 已运行 ' + Math.floor(d.uptime_sec/60) + ' 分钟 · 刚刚检测';
+  }} catch (e) {{
+    document.getElementById('live').textContent = '⚠ 请求失败：' + e.message + '（服务可能正在重启）';
+  }}
+}}, 20000);
+</script>
+</body></html>"""
+
+
+@app.get("/", response_class=HTMLResponse)
+def index():
+    return _page_html()
 
 
 @app.post("/speaker-embedding")
@@ -683,5 +899,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
-    args = parser.parse_args()
-    uvicorn.run(app, host=args.host, port=args.port)
+    _args = parser.parse_args()
+    _LISTEN_PORT = _args.port
+    uvicorn.run(app, host=_args.host, port=_args.port)
