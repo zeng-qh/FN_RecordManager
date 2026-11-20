@@ -119,6 +119,29 @@ public class AsrClient(HttpClient http, VaultConfig cfg)
     }
 
     /// <summary>
+    /// 边车完整自检状态（实时探测 /health，不走缓存）：设置页「边车状态」面板用。
+    /// 返回 (是否可达, health 原始 JSON)；不可达时 health 为 null。
+    /// </summary>
+    public async Task<(bool Reachable, System.Text.Json.JsonElement? Health)> GetSidecarStatusAsync(
+        CancellationToken ct = default)
+    {
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(3));
+            using var resp = await http.GetAsync(BaseEndpoint + "/health", cts.Token);
+            resp.EnsureSuccessStatusCode();
+            // JsonElement 反序列化结果是深拷贝，响应流释放后仍可安全使用
+            var el = await resp.Content.ReadFromJsonAsync<System.Text.Json.JsonElement>(JsonOpts, cts.Token);
+            return (true, el);
+        }
+        catch
+        {
+            return (false, null);
+        }
+    }
+
+    /// <summary>
     /// 探测边车声纹模型是否就绪（/health 的 diarize 字段）。
     /// 结果缓存 5 分钟：设置页每次打开都会读，避免高频探测。
     /// </summary>

@@ -1619,6 +1619,52 @@ $("#btnChangeToken").onclick = async () => {
   }
 };
 
+// 边车状态面板：经主服务实时探测边车 /health（含组件自检明细）
+$("#btnSidecarStatus").onclick = async () => {
+  $("#sidecarModal").hidden = false;
+  $("#scSummary").textContent = "探测中…";
+  $("#scTable").hidden = true;
+  $("#scError").hidden = true;
+  try {
+    const res = await api("/api/sidecar-status");
+    const d = await res.json();
+    const h = d.health;
+    if (!d.reachable || !h) {
+      $("#scSummary").textContent = "● 边车不可达";
+      $("#scError").textContent =
+        "连不上转写边车：检查边车是否启动、地址（设置页 ASR Endpoint）是否正确。" +
+        "沙箱/树莓派上可直接打开边车自身状态页 http://<边车主机>:8000/ 看失败原因。";
+      $("#scError").hidden = false;
+      return;
+    }
+    const up = h.uptime_sec || 0;
+    const upTxt = up >= 3600 ? Math.floor(up / 3600) + "小时" + Math.floor(up % 3600 / 60) + "分"
+      : up >= 60 ? Math.floor(up / 60) + "分" + up % 60 + "秒" : up + "秒";
+    $("#scSummary").textContent = h.ok
+      ? `● 运行正常 · 已运行 ${upTxt} · ${h.device || "cpu"}/${h.compute || "int8"} · 声纹${h.diarize ? "就绪" : "未就绪"}`
+      : `● 服务异常 · 已运行 ${upTxt}`;
+    $("#scSummary").style.color = h.ok ? "var(--ok)" : "var(--warn)";
+    const tb = $("#scTable");
+    tb.hidden = false;
+    // 组件表：状态行 + 汇总行（已加载模型/任务数由 health 简化输出）
+    tb.innerHTML = '<tr><th>组件</th><th>状态</th><th>说明</th></tr>' +
+      (h.components || []).map(c =>
+        `<tr><td>${c.name}</td>` +
+        `<td style="color:${c.ok ? "var(--ok)" : (c.critical ? "var(--warn)" : "var(--muted)")}">` +
+        `${c.ok ? "✓ 正常" : (c.critical ? "✗ 失败" : "○ 降级")}</td>` +
+        `<td style="word-break:break-all">${c.detail || ""}</td></tr>`).join("");
+    if (!h.ok && h.error) {
+      $("#scError").textContent = "失败原因：" + h.error;
+      $("#scError").hidden = false;
+    }
+  } catch (e) {
+    $("#scSummary").textContent = "● 探测失败";
+    $("#scError").textContent = e.message === "unauthorized" ? "" : "请求失败：" + e.message;
+    $("#scError").hidden = e.message === "unauthorized";
+  }
+};
+$("#scClose").onclick = () => { $("#sidecarModal").hidden = true; };
+
 initTheme(); // 明暗主题：绑定设置下拉 + 跟随系统监听
 
 // 顶栏版本号：展示服务端部署版本（health 为匿名接口，走裸 fetch 静默失败，

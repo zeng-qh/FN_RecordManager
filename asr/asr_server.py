@@ -471,6 +471,21 @@ def _assign_speakers(path: str, segments: list, extractor) -> list:
     return speakers_meta
 
 
+def _components() -> list:
+    """组件自检明细（/health components 字段 + 状态页表格共用）。"""
+    return [
+        {"name": "PyAV（音频解码）", "ok": not _AV_IMPORT_ERROR, "critical": True,
+         "detail": "已就绪" if not _AV_IMPORT_ERROR else _AV_IMPORT_ERROR},
+        {"name": "faster-whisper（转写引擎）", "ok": bool(_fw_check["ok"]),
+         "critical": _fw_check["ok"] is False,
+         "detail": ("已就绪" if _fw_check["ok"] else
+                    "检查中…" if _fw_check["ok"] is None else
+                    "导入失败 — " + _fw_check["error"])},
+        {"name": "声纹模型（CAM++，可选）", "ok": _diarize_ready(), "critical": False,
+         "detail": _diarize_detail()["detail"]},
+    ]
+
+
 @app.get("/health")
 def health():
     err = _critical_error()
@@ -482,6 +497,7 @@ def health():
         "device": os.environ.get("ASR_DEVICE", "cpu"),
         "compute": os.environ.get("ASR_COMPUTE", "int8"),
         "uptime_sec": int(time.time() - _START_TIME),
+        "components": _components(),
     }
 
 

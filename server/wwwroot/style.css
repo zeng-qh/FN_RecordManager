@@ -696,3 +696,9 @@ main { flex: 1; padding: 20px; max-width: 900px; width: 100%; margin: 0 auto; }
   border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent);
   border-radius: 8px; padding: 8px 10px; margin-bottom: 14px;
 }
+
+/* ---- 边车状态弹窗 ---- */
+.sidecar-card { width: 640px; max-width: 94vw; }
+.sc-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.sc-table th, .sc-table td { padding: 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+.sc-table th { color: var(--muted); font-weight: 500; font-size: 12px; }

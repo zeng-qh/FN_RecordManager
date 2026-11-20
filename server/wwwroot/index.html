@@ -179,11 +179,27 @@
     </div>
   </div>
 
+  <!-- 边车状态弹窗：经主服务 /api/sidecar-status 实时探测边车 /health -->
+  <div id="sidecarModal" class="modal" hidden>
+    <div class="modal-card sidecar-card">
+      <h2>转写边车状态</h2>
+      <div id="scSummary" class="srv-status">探测中…</div>
+      <table class="sc-table" id="scTable" hidden>
+        <tr><th>组件</th><th>状态</th><th>说明</th></tr>
+      </table>
+      <div id="scError" class="diarize-warn" hidden></div>
+      <div class="modal-actions">
+        <button id="scClose" type="button">关闭</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 设置弹窗 -->
   <div id="settingsModal" class="modal" hidden>
     <div class="modal-card settings-card">
       <h2>设置</h2>
       <div id="srvStatus" class="srv-status">服务器状态加载中…</div>
+      <label class="row"><button id="btnSidecarStatus" type="button">查看边车状态</button></label>
       <div class="settings-grid">
         <div class="settings-col">
           <h3>外观</h3>

@@ -831,6 +831,15 @@ api.MapGet("/settings", async () =>
     });
 });
 
+// 边车完整自检状态（实时探测边车 /health，不走缓存）：设置页「边车状态」面板用。
+// health 为边车原始返回（status/ok/error/device/compute/uptime_sec/diarize/components），
+// 不可达时 health=null——前端据此区分「没启动」与「组件异常」并展示失败原因。
+api.MapGet("/sidecar-status", async (CancellationToken ct) =>
+{
+    var (reachable, health) = await asr.GetSidecarStatusAsync(ct);
+    return Results.Ok(new { reachable, health });
+});
+
 api.MapPut("/settings", (StoredSettings incoming) =>
 {
     cfg.Asr.Enabled = incoming.Asr.Enabled;
