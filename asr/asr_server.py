@@ -54,6 +54,7 @@ VoiceVault 本地语音转写边车（ASR）
 """
 import argparse
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -76,6 +77,17 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 app = FastAPI(title="VoiceVault ASR")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# 边车独立版本号：二进制发布物 / Docker 镜像 / 状态页三方对齐
+APP_VERSION = "1.1.0"
+
+# 二进制部署（PyInstaller 冻结）时的模型定位基准目录：
+# 冻结后取可执行文件所在目录（约定 models/ 放在 exe 旁边）；
+# 源码运行取脚本目录。Docker 内另有 /app/models 兜底。
+def _app_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
 
 _model_cache = {}
 _s2t_converter = None
@@ -149,10 +161,10 @@ def get_model(model_size: str):
 _speaker_extractor = None
 _speaker_extractor_lock = threading.Lock()
 
-# 模型路径解析顺序：环境变量 → 脚本目录 models/ → /app/models/（Docker 内）
+# 模型路径解析顺序：环境变量 → 可执行/脚本目录 models/ → /app/models/（Docker 内）
 _DIARIZE_MODEL_CANDIDATES = [
     os.environ.get("ASR_DIARIZE_MODEL") or "",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "campplus.onnx"),
+    os.path.join(_app_dir(), "models", "campplus.onnx"),
     "/app/models/campplus.onnx",
 ]
 _DIARIZE_THRESHOLD = float(os.environ.get("ASR_DIARIZE_THRESHOLD", "0.42"))
@@ -493,6 +505,7 @@ def health():
         "status": "ok" if not err else "error",
         "diarize": _diarize_ready(),
         "ok": not err,
+        "version": APP_VERSION,
         "error": err or None,
         "device": os.environ.get("ASR_DEVICE", "cpu"),
         "compute": os.environ.get("ASR_COMPUTE", "int8"),
@@ -640,7 +653,7 @@ code {{ background:#21262d; padding:1px 6px; border-radius:5px; color:#a5d6ff; }
 #live {{ margin-top:14px; font-size:12px; color:#8b949e; }}
 </style></head><body>
 <div class="card">
-  <h1>🎙️ VoiceVault 转写边车 {status_badge}</h1>
+  <h1>🎙️ VoiceVault 转写边车 <span style="color:#8b949e;font-size:13px;font-weight:400">v{_h.escape(APP_VERSION)}</span> {status_badge}</h1>
   <div class="sub">本地语音转写服务（faster-whisper + 声纹分段），数据不出设备</div>
   {banner}
   <table>
@@ -917,4 +930,5 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8000)
     _args = parser.parse_args()
     _LISTEN_PORT = _args.port
+    print(f"[asr] voicvault-asr v{APP_VERSION} starting on {_args.host}:{_args.port}", flush=True)
     uvicorn.run(app, host=_args.host, port=_args.port)

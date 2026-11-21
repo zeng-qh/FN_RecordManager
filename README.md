@@ -40,6 +40,10 @@
 
 ## 一、服务端部署（NAS，任选其一）
 
+> **边车部署形态**：转写边车除随 compose 部署外，还支持**独立部署**——
+> Windows / Linux 二进制（PyInstaller 打包，含 GitHub Actions 自动构建）或
+> 独立 Docker 容器，可与主服务分机部署。详见 [asr/DEPLOY.md](asr/DEPLOY.md)。
+
 ### 方式 A：Docker Compose（推荐）
 
 ```bash

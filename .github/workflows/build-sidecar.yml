@@ -1,0 +1,84 @@
+# 转写边车多平台二进制构建：Windows / Linux（amd64）
+# 触发：
+#   - asr/** 有改动推送到 main / sidecar-standalone 分支 → 构建并上传 artifact
+#   - 推送 sidecar-v* 标签（如 sidecar-v1.1.0）           → 构建并发布 Release
+#   - 手动 workflow_dispatch
+name: build-sidecar
+
+on:
+  push:
+    branches: [main, sidecar-standalone]
+    tags: ["sidecar-v*"]
+    paths: ["asr/**", ".github/workflows/build-sidecar.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: asr
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Build (PyInstaller onedir)
+        run: pyinstaller --noconfirm --clean --distpath dist --workpath build asr_server.spec
+
+      # 声纹模型（可选组件）打进产物：GitHub 直连失败自动换镜像通道
+      - name: Bundle voiceprint model
+        shell: bash
+        run: |
+          mkdir -p dist/voicvault-asr/models
+          URLS=(
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
+            "https://gh-proxy.com/https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
+          )
+          for u in "${URLS[@]}"; do
+            curl -fsSL --retry 2 --max-time 600 -o dist/voicvault-asr/models/campplus.onnx "$u" \
+              && [ "$(wc -c < dist/voicvault-asr/models/campplus.onnx)" -gt 10000000 ] && break
+            rm -f dist/voicvault-asr/models/campplus.onnx
+          done
+
+      - name: Fix exec bit (Linux)
+        if: runner.os == 'Linux'
+        run: chmod +x dist/voicvault-asr/voicvault-asr
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: voicvault-asr-${{ runner.os == 'Linux' && 'linux-x64' || 'windows-x64' }}
+          path: dist/voicvault-asr/
+
+  release:
+    # 推 sidecar-v* 标签时把两平台产物打包成 zip 发 Release
+    if: startsWith(github.ref, 'refs/tags/sidecar-v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+
+      - name: Pack zips
+        run: |
+          for d in voicvault-asr-*/; do
+            zip -r "${d%/}.zip" "$d"
+          done
+          ls -lh *.zip
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: voicvault-asr-*.zip
+          generate_release_notes: true
