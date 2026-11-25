@@ -5,12 +5,14 @@
 #   2. docker compose up -d
 #   3. 浏览器打开 http://<设备ip>:8080 ，设置里填同一个令牌
 #
-# ┌ 转写边车开关 ─────────────────────────────────────────────
-# │ 默认开启：docker compose up -d 会同时启动主服务 + 转写边车
-# │ 不要转写（2GB 小设备省内存）二选一：
-# │   a) 注释掉下方整个 asr: 服务块，再 docker compose up -d
-# │   b) docker compose up -d voicvault      （只起主服务）
-# │ 并在网页端「设置」把转写时机改为 Off，避免新录音转写失败标错
+# ┌ 转写边车开关（默认关闭）──────────────────────────────────
+# │ 默认：docker compose up -d 只启动主服务（纯备份，不转写）
+# │ 要开启语音转写，两步：
+# │   1. docker compose --profile asr up -d
+# │      （边车随主服务一起启动；单独 docker compose up -d asr 也可以）
+# │   2. 浏览器设置页打开「语音转写」开关并保存（写入 /data/settings.json，
+# │      重启不丢；之后不想用了在设置页关掉即可，无需改本文件）
+# │ 注：转写开关也可以直接改下方 VAULT_ASR__ENABLED=true，二选一
 # └───────────────────────────────────────────────────────────
 #
 # ┌ 内存档位速查 ─────────────────────────────────────────────
@@ -45,9 +47,10 @@ services:
       - VAULT_ASR__ENDPOINT=http://asr:8000
       # 转写模型：2GB 设备用 tiny；4GB 推荐改 small（中文准确率明显更好）
       - VAULT_ASR__MODEL=tiny
-      # 默认开启实时转写（上传即转）。改 false 则只备份不自动转写
+      # 转写默认关闭（边车默认不启动，开着会反复重试报错）。
+      # 启动边车后：网页设置页打开「语音转写」即可（或改回 true）
       # 转写时机：Off（关闭，仅手动）/ Realtime（上传即转）/ Idle（闲时转写）
-      - VAULT_ASR__ENABLED=true
+      - VAULT_ASR__ENABLED=false
       - VAULT_ASR__MODE=Realtime
       - VAULT_ASR__IDLESTARTHOUR=22
       - VAULT_ASR__IDLEENDHOUR=7
@@ -64,12 +67,15 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # 本地语音转写边车（默认随 docker compose up -d 一起启动）。
-  # 不需要转写（省内存）：注释掉本块，或 docker compose up -d voicvault。
+  # 本地语音转写边车（默认不启动；由上方 profiles 控制）。
+  # 开启：docker compose --profile asr up -d（或 docker compose up -d asr）
+  # 开启后到网页设置页打开「语音转写」开关。不需要转写则无需理会本块。
   # 注意：2GB 树莓派必须保持 tiny；4GB 可改 small 并放宽下方内存/CPU。
   asr:
     image: ghcr.io/zeng-qh/voicvault-asr:latest
     build: ./asr
+    profiles:
+      - asr
     ports:
       - "8000:8000"
     environment:

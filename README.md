@@ -17,14 +17,15 @@
   └─ ADB 无线导入（服务端拉取） ──┘       · 网页端: 内置单页 UI
                                               │ 可选
                                   ASR 边车 (Python + faster-whisper)
-                                  本地推理，文字稿回写；compose 默认
-                                  随主服务一起启动
+                                  本地推理，文字稿回写；compose 中
+                                  默认不启动，需要时 --profile asr 开启
 ```
 
-> **容易混淆的两层「开关」**：转写**功能**默认开启（`VAULT_ASR__ENABLED=true` + 实时模式），
-> ASR **边车容器**在 compose 里也默认随 `docker compose up -d` 一起启动。不想要转写
-> （如 2GB 小设备省内存）：注释掉 compose 里的 `asr:` 服务块（或 `docker compose up -d voicvault`
-> 只起主服务），并把设置里的转写时机改为 Off。
+> **容易混淆的两层「开关」**：转写**功能**（`VAULT_ASR__ENABLED`，默认 `false`）与
+> ASR **边车容器**（compose `profiles: [asr]`，默认不启动）是两回事。默认部署
+> `docker compose up -d` 只启动主服务、纯备份不转写。要开启转写：
+> `docker compose --profile asr up -d` 启动边车，再到网页设置页打开「语音转写」
+> 开关（写入 settings.json，重启不丢；不想用了在设置页关掉即可）。
 
 ## 组件
 
@@ -49,9 +50,11 @@
 ```bash
 # 1. 编辑 docker-compose.yml（全部配置都在这个文件里，无需 .env）：
 #    - VAULT_TOKEN=change-me-please 改成你的强令牌
-#    - 不要转写：注释掉 asr: 服务块；4GB 设备：VAULT_ASR__MODEL 改 small
-# 2. 启动（主服务 + 转写边车一起起来）
+#    - 要转写：--profile asr 启动（见下）；4GB 设备：VAULT_ASR__MODEL 改 small
+# 2. 启动（默认只起主服务，纯备份；边车默认不启动）
 docker compose up -d
+# 要语音转写：docker compose --profile asr up -d ，
+# 然后到网页设置页打开「语音转写」开关
 # 浏览器打开 http://<nas-ip>:8080/?token=你的令牌 ，免填令牌直接进入
 # （URL 参数会自动保存并从地址栏移除；也可打开不带 token 的地址，在设置里手动填）
 ```
@@ -153,7 +156,7 @@ WantedBy=multi-user.target
 | 服务端 .NET（空闲） | ~50–80 MB | GC 堆硬上限约 600 MB（见下） |
 | 上传 / 播放峰值 | +50–150 MB | 全程流式处理，不把整段录音读进内存 |
 | 系统 + fnOS | ~400–600 MB | 树莓派 OS 基础占用 |
-| ASR 边车（默认随 compose 启动） | 0 | 注释掉 asr 服务块即不占 |
+| ASR 边车（默认不启动） | 0 | `--profile asr` 启动后占一行 |
 | **合计（仅服务端）** | **~600–800 MB** | 2GB 设备仍有约 1.2GB 余量 |
 
 > 一旦开启转写（tiny + int8），边车会再占 ~300–500 MB，**small/medium 模型在 2GB 上基本会 OOM，切勿使用**。
@@ -191,13 +194,19 @@ Whisper 推理吃 CPU，Pi 4B（A72 四核 @1.5GHz，无 AVX）与 x86 服务器
 ### 部署要点
 
 - 默认 `mem_limit: 896m`，与 GC 堆上限配合，OOM 风险极低。
-- ASR 边车默认**随 `docker compose up -d` 一起启动**，不需要转写时二选一：
+- ASR 边车**默认不启动**（`profiles: [asr]`），默认部署只跑主服务、纯备份。
+  需要转写时再开启：
 
   ```bash
-  # 方式一：注释掉 docker-compose.yml 里的 asr: 服务块，再 up -d
-  # 方式二：只启动主服务
-  docker compose up -d voicvault
+  # 启动主服务 + 边车（边车随 profile 一起拉起）
+  docker compose --profile asr up -d
+  # 然后到网页设置页打开「语音转写」开关并保存即可
+
+  # 单独补启边车（主服务已在跑时）
+  docker compose up -d asr
   ```
+
+  关闭转写：网页设置页关掉开关（或 `docker compose stop asr` 停边车）。
 
   然后在网页端「设置」里打开 ASR，并选择「实时转写」或「闲时转写」即可。
 - **ASR 边车地址**：compose 同栈部署填 `http://asr:8000`（服务名解析，

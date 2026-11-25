@@ -24,6 +24,15 @@ docker run -d --name voicvault-asr \
 ```
 
 或直接用仓库根目录的 `docker-compose.yml`（`asr` 服务块已配好内存/线程限制）。
+**注意**：仓库 compose 里边车默认不启动（`profiles: [asr]`），开启方式：
+
+```bash
+docker compose --profile asr up -d   # 主服务 + 边车一起启动
+# 或主服务已在跑时单独补启边车：
+docker compose up -d asr
+```
+
+启动边车后到网页设置页打开「语音转写」开关（默认关闭）。
 声纹模型构建镜像时已内置，无需额外下载。
 
 ---
